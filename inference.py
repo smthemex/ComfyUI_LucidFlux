@@ -389,26 +389,67 @@ def preprocess_data(state_dict,swinir_path,siglip_model,input_pli_list, inp_cond
                   "condition_cond":condition_cond, "condition_cond_ldr": condition_cond_ldr,"ci_pre_origin":ci_pre_origin}
         data_list.append(data)
     return data_list
-            
-def get_cond(positive,height,width,device,bs=1):
 
+def prepare_with_embeddings(img, precomputed_txt, precomputed_vec):
+    """
+    使用预计算embeddings的prepare函数
+    """
+    bs, _, h, w = img.shape
+
+    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+
+    img_ids = torch.zeros(h // 2, w // 2, 3, device=img.device, dtype=img.dtype)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2, device=img.device)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2, device=img.device)[None, :]
+    img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+
+    # 直接使用预计算的embeddings
+    txt = precomputed_txt
+    vec = precomputed_vec
+    txt_ids = torch.zeros(bs, txt.shape[1], 3, device=img.device, dtype=img.dtype)
+
+    return {
+        "img": img,
+        "img_ids": img_ids,
+        "txt": txt,
+        "txt_ids": txt_ids,
+        "vec": vec,
+    }
+       
+def get_cond(positive,emb_path,height,width,device,bs=1):
     h=2 * math.ceil(height / 16)
     w=2 * math.ceil(width / 16)
 
     img_ids = torch.zeros(h // 2, w // 2, 3)
     img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
     img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
-
     img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+    if emb_path is None and positive is not None:
+        txt = positive[0][0]
+        if txt.shape[0] == 1 and bs > 1:
+            txt = repeat(txt, "1 ... -> bs ...", bs=bs)
+        txt_ids = torch.zeros(bs, txt.shape[1], 3)
+        vec = positive[0][1].get("pooled_output")
+        if vec.shape[0] == 1 and bs > 1:
+            vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 
-    txt = positive[0][0]
-    if txt.shape[0] == 1 and bs > 1:
-        txt = repeat(txt, "1 ... -> bs ...", bs=bs)
-    txt_ids = torch.zeros(bs, txt.shape[1], 3)
-
-    vec = positive[0][1].get("pooled_output")
-    if vec.shape[0] == 1 and bs > 1:
-        vec = repeat(vec, "1 ... -> bs ...", bs=bs)
+        return inp_cond
+    elif emb_path is not None:
+        # 使用预计算的embeddings
+        #embeddings_path = "weights/lucidflux/prompt_embeddings.pt"
+        print(f"Loading precomputed embeddings from {emb_path}")
+        embeddings_data = torch.load(emb_path,weights_only=False, map_location='cpu')
+        precomputed_txt = embeddings_data['txt'].to(device)
+        precomputed_vec = embeddings_data['vec'].to(device)
+        original_prompt = embeddings_data.get('prompt', 'Unknown prompt')
+        print(f"Loaded embeddings for prompt: '{original_prompt}',txt shape: {precomputed_txt.shape}, vec shape: {precomputed_vec.shape}")
+        # 直接使用预计算的embeddings
+        txt = precomputed_txt
+        vec = precomputed_vec
+        txt_ids = torch.zeros(bs, txt.shape[1], 3)
+    else:
+        raise ValueError("Invalid embedding path or conditions")
+    
     inp_cond={
             "img_ids": img_ids.to(device),
             "txt": txt.to(device),
@@ -416,7 +457,6 @@ def get_cond(positive,height,width,device,bs=1):
             "vec": vec.to(device),
                 }
     return inp_cond
-
 
 def load_condition_model(model,lora_path,lora_scale):
     if lora_path is None:

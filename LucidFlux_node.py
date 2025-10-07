@@ -99,23 +99,25 @@ class LucidFlux_SM_Encode(io.ComfyNode):
             inputs=[
                 io.Custom("LucidFlux_SD").Input("state_dict"),
                 io.Image.Input("image"),
-                io.Conditioning.Input("positive"),
+                io.ClipVision.Input("CLIP_VISION"),
                 io.Combo.Input("swinir",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "swinir" in i.lower() ] ),
                 io.Int.Input("width", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=16,display_mode=io.NumberDisplay.number),
                 io.Int.Input("height", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=16,display_mode=io.NumberDisplay.number),
-                io.ClipVision.Input("CLIP_VISION"),
+                io.Combo.Input("emb",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "prompt" in i.lower() ]),
+                io.Conditioning.Input("positive",optional=True),     
             ],
             outputs=[
                 io.Conditioning.Output(display_name="condition"),
                 ],
         )
     @classmethod
-    def execute(cls, state_dict,positive, image,swinir,width,height,CLIP_VISION) -> io.NodeOutput:
+    def execute(cls, state_dict,CLIP_VISION, image,swinir,width,height,emb,positive=None) -> io.NodeOutput:
         swinir_path=folder_paths.get_full_path("LucidFlux", swinir) if swinir != "none" else None
+        emb_path=folder_paths.get_full_path("LucidFlux", emb) if emb != "none" else None
         #siglip_ckpt=folder_paths.get_full_path("clip_vision", siglip_ckpt) if siglip_ckpt != "none" else None
         assert swinir_path is not None ,"need swinir"
         input_pli_list=tensor2pillist_upscale(image,width,height)
-        inp_cond=get_cond(positive,height,width,device)
+        inp_cond=get_cond(positive,emb_path,height,width,device)
         postive=preprocess_data(state_dict,swinir_path,CLIP_VISION,input_pli_list, inp_cond,device)
         return io.NodeOutput(postive)
 
