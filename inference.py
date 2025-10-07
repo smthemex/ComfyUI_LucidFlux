@@ -333,7 +333,11 @@ def preprocess_data(state_dict,swinir_path,siglip_model,input_pli_list, inp_cond
     del state
     for p in swinir.parameters():
         p.requires_grad_(False)
-    swinir = swinir.to(torch_device)
+    try:
+        swinir = swinir.to(torch_device)
+    except:
+        swinir = swinir.to(torch.device("cpu"))
+    #swinir = swinir.to(torch_device)
 
     dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
     # siglip_model = SiglipVisionModel.from_pretrained(siglip_ckpt)
@@ -356,7 +360,7 @@ def preprocess_data(state_dict,swinir_path,siglip_model,input_pli_list, inp_cond
         with torch.no_grad():
             # SwinIR prior
             ci_01 = torch.clamp((condition_cond.float() + 1.0) / 2.0, 0.0, 1.0)
-            ci_pre = swinir(ci_01).float().clamp(0.0, 1.0) #(1,3,H,W) or 3 h w
+            ci_pre = swinir(ci_01).float().clamp(0.0, 1.0).to(torch_device) #(1,3,H,W) or 3 h w
             ci_pre_origin=ci_pre
             # save_image(ci_pre, os.path.join(args.output_dir, f"{filename}_swinir_pre.jpeg"))
             condition_cond_ldr = (ci_pre * 2.0 - 1.0).to(torch.bfloat16)
