@@ -17,8 +17,7 @@ MAX_SEED = np.iinfo(np.int32).max
 
 device = torch.device(
     "cuda:0") if torch.cuda.is_available() else torch.device(
-    "mps") if torch.backends.mps.is_available() else torch.device(
-    "cpu")
+    "mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
 node_cr_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -48,6 +47,12 @@ class LucidFlux_SM_Model(io.ComfyNode):
     @classmethod
     def execute(cls, LucidFlux,diffusion_models,cf_model=None) -> io.NodeOutput:
         is_dev="flux-dev" if "dev" in diffusion_models.lower() else "flux-schnell"
+        if cf_model is not None:
+            if "guidance_in.in_layer.weight" in cf_model.model.diffusion_model.state_dict().keys():
+                is_dev="flux-dev"
+            else:
+                is_dev="flux-schnell"
+            print("flux is :",is_dev)
         LucidFlux_path=folder_paths.get_full_path("LucidFlux", LucidFlux) if LucidFlux != "none" else None
         ckpt_path=folder_paths.get_full_path("diffusion_models", diffusion_models) if diffusion_models != "none" else None
         
