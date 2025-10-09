@@ -53,9 +53,17 @@ pip install -r requirements.txt
 # 5 Citation
 ------
 * [FLUX ](https://github.com/black-forest-labs/flux)
-* [ LucidFlux ](https://github.com/W2GenAI-Lab/LucidFlux)
 * [ X-flux](https://github.com/XLabs-AI/x-flux)
 
+ LucidFlux 
+```
+@article{fei2025lucidflux,
+  title={LucidFlux: Caption-Free Universal Image Restoration via a Large-Scale Diffusion Transformer},
+  author={Fei, Song and Ye, Tian and Wang, Lujia and Zhu, Lei},
+  journal={arXiv preprint arXiv:2509.22414},
+  year={2025}
+}
+```
 DreamClear
 ```
 @article{ai2024dreamclear,
