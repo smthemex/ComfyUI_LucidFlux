@@ -11,6 +11,7 @@ import folder_paths
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import nodes
+import comfy.model_management as mm
 from .src.flux.align_color import wavelet_reconstruction
 
 MAX_SEED = np.iinfo(np.int32).max
@@ -80,17 +81,18 @@ class LucidFlux_SM_Cond(io.ComfyNode):
                 io.Custom("LucidFlux_SM").Input("model"),
                 io.Combo.Input("lora1",options= ["none"] + folder_paths.get_filename_list("loras")),
                 io.Combo.Input("lora2",options= ["none"] + folder_paths.get_filename_list("loras")),
-                io.Float.Input("scale", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.slider),
+                io.Float.Input("scale1", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.slider),
+                io.Float.Input("scale2", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.slider),
                 ],
             outputs=[io.Custom("LucidFlux_SM").Output()],
         )
     @classmethod
-    def execute(cls, model,lora1,lora2,scale) -> io.NodeOutput:
+    def execute(cls, model,lora1,lora2,scale1,scale2) -> io.NodeOutput:
         lora1_path=folder_paths.get_full_path("loras", lora1) if lora1!="none" else None
         lora2_path=folder_paths.get_full_path("loras", lora2) if lora2!="none" else None
         lora_list=[i for i in [lora1_path,lora2_path] if i is not None]
-        lora_path= lora_list[0] if lora_list else None
-        model=load_condition_model(model,lora_path,scale)
+        lora_path= lora_list if lora_list else None
+        model=load_condition_model(model,lora_path,[scale1,scale2])
         return io.NodeOutput (model)
 
 
@@ -106,8 +108,8 @@ class LucidFlux_SM_Encode(io.ComfyNode):
                 io.Image.Input("image"),
                 io.ClipVision.Input("CLIP_VISION"),
                 io.Combo.Input("swinir",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "swinir" in i.lower() ] ),
-                io.Int.Input("width", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=16,display_mode=io.NumberDisplay.number),
-                io.Int.Input("height", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=16,display_mode=io.NumberDisplay.number),
+                io.Int.Input("width", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=64,display_mode=io.NumberDisplay.number),
+                io.Int.Input("height", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=64,display_mode=io.NumberDisplay.number),
                 io.Combo.Input("emb",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "prompt" in i.lower() ]),
                 io.Conditioning.Input("positive",optional=True),     
             ],
@@ -124,6 +126,10 @@ class LucidFlux_SM_Encode(io.ComfyNode):
         input_pli_list=tensor2pillist_upscale(image,width,height)
         inp_cond=get_cond(positive,emb_path,height,width,device)
         postive=preprocess_data(state_dict,swinir_path,CLIP_VISION,input_pli_list, inp_cond,device)
+        cf_models=mm.loaded_models()
+        for model in cf_models:   
+            model.unpatch_model(device_to=torch.device("cpu"))
+        mm.soft_empty_cache()
         return io.NodeOutput(postive)
 
 
