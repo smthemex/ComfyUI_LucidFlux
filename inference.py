@@ -265,7 +265,6 @@ def load_lucidflux_model(args,ckpt_path,cf_model,torch_device):
     is_schnell = name == "flux-schnell"
     
 
-
     model=load_flow_model(name,ckpt_path,cf_model)
 
 
@@ -462,35 +461,36 @@ def get_cond(positive,emb_path,height,width,device,bs=1):
                 }
     return inp_cond
 
-def load_condition_model(model,lora_path,lora_scale):
-    if lora_path is None:
+def load_condition_model(model,lora_paths,lora_scales):
+    if lora_paths is None:
             return model
     try:
-        model_int = model.get("model")
-        _apply_lora_weights(model_int, lora_path, lora_scale)
-        
-        print(f"Successfully applied LoRA: {lora_path} with scale {lora_scale}")
-        model["model"]=model_int
-
+        if len(lora_paths)!=len(lora_scales): #sacles  
+            lora_scales = lora_paths[:1]
+        for i, (lora_path, lora_scale) in enumerate(zip(lora_paths, lora_scales)):
+            if lora_path is not None:
+                try:
+                    model_int = model.get("model")
+                    _apply_lora_weights(model_int, lora_path, lora_scale)
+                    #print(f"Successfully applied LoRA {i+1}: {lora_path} with scale {lora_scale}")
+                    model["model"] = model_int
+                except Exception as e:
+                    print(f"Failed to apply LoRA {i+1} ({lora_path}): {str(e)}")
         return model
         
     except Exception as e:
         print(f"Failed to apply LoRA {str(e)}")
         return model
 
-def _apply_lora_weights( model, lora_path, scale):
-
+def _apply_lora_weights(model, lora_path, scale):
     from safetensors.torch import load_file as load_sft
     
     lora_sd = load_sft(lora_path, device="cpu")
-    
-    # 获取模型状态字典
     model_sd = model.state_dict()
     
-    # 应用LoRA权重
+    applied_weights = 0
     for key in lora_sd:
         if "lora_up" in key:
-            # 找到对应的down权重和原始权重
             down_key = key.replace("lora_up", "lora_down")
             original_key = _get_original_key(key)
             
@@ -499,14 +499,14 @@ def _apply_lora_weights( model, lora_path, scale):
                 down_weight = lora_sd[down_key]
                 original_weight = model_sd[original_key]
                 
-                # 计算LoRA增量并应用
                 with torch.no_grad():
                     lora_delta = (down_weight @ up_weight) * scale
                     model_sd[original_key].copy_(original_weight + lora_delta)
+                    applied_weights += 1
     
-    # 更新模型权重
     model.load_state_dict(model_sd)
     del lora_sd
+    #print(f"Applied {applied_weights} LoRA weights from {lora_path}")
 
 def _get_original_key(lora_key):
     """从LoRA键名获取原始模型键名"""
