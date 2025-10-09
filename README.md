@@ -2,6 +2,7 @@
  [LucidFlux](https://github.com/W2GenAI-Lab/LucidFlux): Caption-Free Universal Image Restoration with a Large-Scale Diffusion Transformer，you can use it in ComfyUI
 
 # Update
+* you can use turbo and real lora now / 支持加载加速和真实lora，工作流已替换，输入尺寸必须为64的整数倍，不一定要正方形
 * 测试环境cu128+torch2.8.0， Vram 4070 12G，Ram 64G ，python3.11,同步官方prompt_embeddings代码，kj dit use  [links](https://huggingface.co/Kijai/flux-fp8/blob/main/flux1-dev-fp8.safetensors) ,官方dit默认要加载clip模型，不建议内存小的人用‘  
 
   
@@ -21,7 +22,7 @@ pip install -r requirements.txt
 3.checkpoints 
 ----
 * any flux dit / 任意flux模型， KJ的 或者官方封装的
-* lucid checkpoints [links](https://huggingface.co/W2GenAI/LucidFlux/tree/main) /lucidflux.pth 和prompt_embeddings.pt（这个是昨天发的 我暂时还没用上）   
+* lucid checkpoints [links](https://huggingface.co/W2GenAI/LucidFlux/tree/main) /lucidflux.pth 和prompt_embeddings.pt
 * siglip512 [links](https://huggingface.co/google/siglip2-so400m-patch16-512/tree/main) / model.safetensors 只下单体模型   
 * DiffBIR [links](https://huggingface.co/lxq007/DiffBIR/tree/main)  /  general_swinir_v1.ckpt  
 * turbo lora [links](https://huggingface.co/alimama-creative/FLUX.1-Turbo-Alpha)  #optional 可选，8 步起  
@@ -41,6 +42,9 @@ pip install -r requirements.txt
 ```
 
 # 4 Example
+
+* use dual lora 
+![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example1009.png)
 * use embeddings to save VRAM  
 ![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example.png)
 * use clip to encoder prompt  
