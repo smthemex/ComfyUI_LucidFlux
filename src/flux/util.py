@@ -263,6 +263,7 @@ def load_flow_model(name,ckpt_path,cf_model):
         )   
     else:
         original_sd = cf_model.model.diffusion_model.state_dict()
+        
         load_checkpoint_and_dispatch_(
             model,
             original_sd,

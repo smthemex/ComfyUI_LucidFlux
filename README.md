@@ -23,7 +23,7 @@ pip install -r requirements.txt
 * any flux dit / 任意flux模型， KJ的 或者官方封装的（可能有key不匹配的问题，正在测试）  
 * lucid checkpoints [links](https://huggingface.co/W2GenAI/LucidFlux/tree/main) /lucidflux.pth 和prompt_embeddings.pt（这个是昨天发的 我暂时还没用上）   
 * siglip512 [links](https://huggingface.co/google/siglip2-so400m-patch16-512/tree/main) / model.safetensors 只下单体模型   
-* DiffBIR [links](https://huggingface.co/lxq007/DiffBIR/tree/main)  /  general_swinir_v1.ckpt  
+* DiffBIR [links](https://huggingface.co/lxq007/DiffBIR/tree/main)  /  general_swinir_v1.ckpt   or v2
 * turbo lora [links](https://huggingface.co/alimama-creative/FLUX.1-Turbo-Alpha)  #optional 可选，8 步起  
 * comfy T5 ，clip-L and flux ae   [links](https://huggingface.co/Comfy-Org/models)   #comfy T5 ，clip-L is optional / comfy T5和clip-L可选，如图例所示，直接加载emb
 ```
@@ -41,7 +41,9 @@ pip install -r requirements.txt
 ```
 
 # 4 Example
-* use embeddings to save VRAM  
+*  not use diffbir  
+![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example_nodif.png)
+* use embeddings to save VRAM  and diffbir_v2
 ![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example.png)
 * use clip to encoder prompt  
 ![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example1007.png)

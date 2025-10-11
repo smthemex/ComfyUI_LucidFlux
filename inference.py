@@ -10,7 +10,9 @@ from diffusers.pipelines.flux.modeling_flux import ReduxImageEncoder
 from .src.flux.sampling import denoise_lucidflux, get_noise, get_schedule, unpack
 from .src.flux.util import load_flow_model, load_single_condition_branch, load_safetensors
 from .src.flux.swinir import SwinIR
-
+from .model_loader_utils import phi2narry
+node_cr_path = os.path.dirname(os.path.abspath(__file__))
+import folder_paths
 
 def get_timestep_embedding(
     timesteps: torch.Tensor,
@@ -257,17 +259,81 @@ def load_redux_image_encoder(device: torch.device, dtype: torch.dtype, redux_sta
     redux_image_encoder.to(device).to(dtype=dtype)
     return redux_image_encoder
 
+def load_diffbir_model(diffbir_v2,swinir_path,cur_path,out_path,torch_device="cpu"):
+    if "none"==diffbir_v2:
+        swinir = SwinIR(
+            img_size=64,
+            patch_size=1,
+            in_chans=3,
+            embed_dim=180,
+            depths=[6, 6, 6, 6, 6, 6, 6, 6],
+            num_heads=[6, 6, 6, 6, 6, 6, 6, 6],
+            window_size=8,
+            mlp_ratio=2,
+            sf=8,
+            img_range=1.0,
+            upsampler="nearest+conv",
+            resi_connection="1conv",
+            unshuffle=True,
+            unshuffle_scale=8,
+        )
+        ckpt_obj = torch.load(swinir_path, weights_only=False,map_location="cpu")
+        state = ckpt_obj.get("state_dict", ckpt_obj)
+        new_state = {k.replace("module.", ""): v for k, v in state.items()}
+        swinir.load_state_dict(new_state, strict=False)
+        swinir.eval()
+        del state
+        for p in swinir.parameters():
+            p.requires_grad_(False)
+        swinir = swinir.to(torch.device("cpu"))
+    else:
+        from .src.DiffBIR.inference import load_diffbir_model
+        swinir=load_diffbir_model(diffbir_v2,swinir_path,torch_device,cur_path,out_path)
+    return swinir
 
+def infer_diffbir_model(model,input_pli_list,torch_device,):
+    swinir=model.get("model")
+    is_v2=model.get("is_v2")
+    
+    if not is_v2:
+        swinir.to(torch_device)
+    else:
+        swinir.to(torch_device,dtype=torch.bfloat16)
+    images=[]
+    for lq_processed in input_pli_list:
+        if not is_v2:
+            condition_cond = torch.from_numpy((np.array(lq_processed) / 127.5) - 1)
+            condition_cond = condition_cond.permute(2, 0, 1).unsqueeze(0).to(torch.bfloat16).to(torch_device)
+        else:
+            condition_cond=None
+        with torch.no_grad():
+            # SwinIR prior
+            if  not is_v2:
+                ci_01 = torch.clamp((condition_cond.float() + 1.0) / 2.0, 0.0, 1.0)
+                ci_pre = swinir(ci_01).float().clamp(0.0, 1.0).to(torch_device) #(1,3,H,W) or 3 h w
+                #print(ci_pre.shape) #torch.Size([1, 3, 1024, 1024])
+                if ci_pre.ndim == 3:
+                    ci_pre = ci_pre.unsqueeze(0)
+                ci_pre=ci_pre.permute(0, 2, 3, 1)# to comfy
+            else:             
+                ci_pre_list=swinir.run(lq_processed)
+                ci_pre=[phi2narry(i).to(torch_device) for i in ci_pre_list][0]
+                #print( 123,ci_pre.shape) #torch.Size([ 1, 1024, 1024, 3])
+            images.append(ci_pre)
+    if not is_v2:
+        swinir.to(torch.device("cpu"))
+    else:
+        swinir.to("cpu")
+    torch.cuda.empty_cache()
+    image_tensor=torch.cat(images,dim=0)
+    return image_tensor
 
 def load_lucidflux_model(args,ckpt_path,cf_model,torch_device):
     name =args.name #"flux-dev"
     #offload = args.offload
     is_schnell = name == "flux-schnell"
     
-
-
     model=load_flow_model(name,ckpt_path,cf_model)
-
 
     condition_lq=load_single_condition_branch(name, torch_device).to(torch.bfloat16)
 
@@ -298,79 +364,42 @@ def load_lucidflux_model(args,ckpt_path,cf_model,torch_device):
             modulation_ldr=modulation_ldr,
         ).to(torch_device)
     
-
     
     state_dict=checkpoint["connector"]
     del checkpoint
     pipe={"model":model,"dual_condition_branch":dual_condition_branch,"is_schnell":is_schnell}
     return pipe,state_dict
 
-def preprocess_data(state_dict,swinir_path,siglip_model,input_pli_list, inp_cond,torch_device):
-     # SwinIR prior (frozen)
-    # if args.swinir_pretrained is None:
-    #     raise ValueError("SwinIR pretrained is not provided")
-    swinir = SwinIR(
-        img_size=64,
-        patch_size=1,
-        in_chans=3,
-        embed_dim=180,
-        depths=[6, 6, 6, 6, 6, 6, 6, 6],
-        num_heads=[6, 6, 6, 6, 6, 6, 6, 6],
-        window_size=8,
-        mlp_ratio=2,
-        sf=8,
-        img_range=1.0,
-        upsampler="nearest+conv",
-        resi_connection="1conv",
-        unshuffle=True,
-        unshuffle_scale=8,
-    )
-    ckpt_obj = torch.load(swinir_path, weights_only=False,map_location="cpu")
-    state = ckpt_obj.get("state_dict", ckpt_obj)
-    new_state = {k.replace("module.", ""): v for k, v in state.items()}
-    swinir.load_state_dict(new_state, strict=False)
-    swinir.eval()
-    del state
-    for p in swinir.parameters():
-        p.requires_grad_(False)
-    swinir = swinir.to(torch_device)
+def tensor2image(tensor):
+    tensor = tensor.cpu()
+    image_np = tensor.squeeze().mul(255).clamp(0, 255).byte().numpy()
+    image = Image.fromarray(image_np, mode='RGB')
+    return image
+
+def preprocess_data(state_dict,siglip_model,tensor_list, inp_cond,torch_device):
 
     dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
-    # siglip_model = SiglipVisionModel.from_pretrained(siglip_ckpt)
-    # siglip_model.eval()
-    # siglip_model.to(torch_device).to(dtype=dtype)
 
     redux_image_encoder = load_redux_image_encoder(torch_device, dtype, state_dict)
     del state_dict
     data_list=[]
-    for lq_processed in input_pli_list:
+    for ci_pre in tensor_list: #( 1HW3 )
         #filename = os.path.basename(img_path).split(".")[0]
-        
-        # For each image, compute processed resolution and persist preview
-        #lq_processed = preprocess_lq_image(img_path, width, height)
-        #lq_processed.save(os.path.join(args.output_dir, f"{filename}_lq_processed.jpeg"))
+        lq_processed=tensor2image(ci_pre)
         condition_cond = torch.from_numpy((np.array(lq_processed) / 127.5) - 1)
         condition_cond = condition_cond.permute(2, 0, 1).unsqueeze(0).to(torch.bfloat16).to(torch_device)
         condition_cond_ldr = None
 
         with torch.no_grad():
-            # SwinIR prior
-            ci_01 = torch.clamp((condition_cond.float() + 1.0) / 2.0, 0.0, 1.0)
-            ci_pre = swinir(ci_01).float().clamp(0.0, 1.0) #(1,3,H,W) or 3 h w
-            ci_pre_origin=ci_pre
-            # save_image(ci_pre, os.path.join(args.output_dir, f"{filename}_swinir_pre.jpeg"))
-            condition_cond_ldr = (ci_pre * 2.0 - 1.0).to(torch.bfloat16)
-            # to comfy siglip
-            if ci_pre.ndim == 3:
-                ci_pre = ci_pre.unsqueeze(0)
-            _,_,height,width=ci_pre.shape
-            #print(ci_pre.shape) #torch.Size([1, 3, 512, 512])
-            ci_pre=ci_pre.permute(0, 2, 3, 1) # to comfy
+
+            ci_pre_origin=ci_pre.permute(0, 3, 1, 2) ## 1HW3 TO (1,3,H,W)
+
+            condition_cond_ldr = (ci_pre_origin * 2.0 - 1.0).to(torch.bfloat16)
+
+            _,height,width,_=ci_pre.shape
             siglip_image_pre_fts=siglip_model.encode_image(ci_pre)["last_hidden_state"].to(device=torch_device,dtype=torch.bfloat16)
             #print(siglip_image_pre_fts.shape) #torch.Size([1, 1024, 1152])
           
-
-
             enc_dtype = redux_image_encoder.redux_up.weight.dtype
             image_embeds = redux_image_encoder(
                 siglip_image_pre_fts.to(device=torch_device, dtype=enc_dtype)
@@ -458,35 +487,36 @@ def get_cond(positive,emb_path,height,width,device,bs=1):
                 }
     return inp_cond
 
-def load_condition_model(model,lora_path,lora_scale):
-    if lora_path is None:
+def load_condition_model(model,lora_paths,lora_scales):
+    if lora_paths is None:
             return model
     try:
-        model_int = model.get("model")
-        _apply_lora_weights(model_int, lora_path, lora_scale)
-        
-        print(f"Successfully applied LoRA: {lora_path} with scale {lora_scale}")
-        model["model"]=model_int
-
+        if len(lora_paths)!=len(lora_scales): #sacles  
+            lora_scales = lora_paths[:1]
+        for i, (lora_path, lora_scale) in enumerate(zip(lora_paths, lora_scales)):
+            if lora_path is not None:
+                try:
+                    model_int = model.get("model")
+                    _apply_lora_weights(model_int, lora_path, lora_scale)
+                    #print(f"Successfully applied LoRA {i+1}: {lora_path} with scale {lora_scale}")
+                    model["model"] = model_int
+                except Exception as e:
+                    print(f"Failed to apply LoRA {i+1} ({lora_path}): {str(e)}")
         return model
         
     except Exception as e:
         print(f"Failed to apply LoRA {str(e)}")
         return model
 
-def _apply_lora_weights( model, lora_path, scale):
-
+def _apply_lora_weights(model, lora_path, scale):
     from safetensors.torch import load_file as load_sft
     
     lora_sd = load_sft(lora_path, device="cpu")
-    
-    # 获取模型状态字典
     model_sd = model.state_dict()
     
-    # 应用LoRA权重
+    applied_weights = 0
     for key in lora_sd:
         if "lora_up" in key:
-            # 找到对应的down权重和原始权重
             down_key = key.replace("lora_up", "lora_down")
             original_key = _get_original_key(key)
             
@@ -495,14 +525,14 @@ def _apply_lora_weights( model, lora_path, scale):
                 down_weight = lora_sd[down_key]
                 original_weight = model_sd[original_key]
                 
-                # 计算LoRA增量并应用
                 with torch.no_grad():
                     lora_delta = (down_weight @ up_weight) * scale
                     model_sd[original_key].copy_(original_weight + lora_delta)
+                    applied_weights += 1
     
-    # 更新模型权重
     model.load_state_dict(model_sd)
     del lora_sd
+    #print(f"Applied {applied_weights} LoRA weights from {lora_path}")
 
 def _get_original_key(lora_key):
     """从LoRA键名获取原始模型键名"""

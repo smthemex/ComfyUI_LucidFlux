@@ -34,6 +34,7 @@ def phi2narry(img):
     return img
 
 def tensor2image(tensor):
+    tensor = tensor.cpu()
     image_np = tensor.squeeze().mul(255).clamp(0, 255).byte().numpy()
     image = Image.fromarray(image_np, mode='RGB')
     return image
@@ -56,7 +57,7 @@ def tensor2pillist_upscale(tensor_in,width,height):
         img_list=[nomarl_upscale(i,width,height) for i in tensor_list]
     return img_list
 
-def tensor2list(tensor_in,width,height):
+def tensor2list_upscale(tensor_in,width,height):
     if tensor_in is None:
         return None
     d1, _, _, _ = tensor_in.size()
@@ -66,6 +67,15 @@ def tensor2list(tensor_in,width,height):
         tensor_list_ = torch.chunk(tensor_in, chunks=d1)
         tensor_list=[tensor_upscale(i,width,height) for i in tensor_list_]
     return tensor_list
+
+def tensor2list(tensor_in):
+    if tensor_in is None:
+        return None
+    d1, _, _, _ = tensor_in.size()
+    if d1 == 1:
+        return [tensor_in]
+    else:
+        return list(torch.chunk(tensor_in, chunks=d1))
 
 
 def tensor_upscale(tensor, width, height):
@@ -80,7 +90,6 @@ def nomarl_upscale(img, width, height):
     samples = img.movedim(1, -1)
     img = tensor2image(samples)
     return img
-
 
 
 def cv2tensor(img,bgr2rgb=True):

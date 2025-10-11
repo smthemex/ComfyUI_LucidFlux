@@ -1,0 +1,182 @@
+model:
+  cldm:
+    target: diffbir.model.cldm.ControlLDM
+    params:
+      latent_scale_factor: 0.18215
+      unet_cfg:
+        use_checkpoint: True
+        image_size: 32 # unused
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_head_channels: 64 # need to fix for flash-attn
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        legacy: False
+      vae_cfg:
+        embed_dim: 4
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult:
+          - 1
+          - 2
+          - 4
+          - 4
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+      clip_cfg:
+        embed_dim: 1024
+        vision_cfg:
+          image_size: 224
+          layers: 32
+          width: 1280
+          head_width: 80
+          patch_size: 14
+        text_cfg:
+          context_length: 77
+          vocab_size: 49408
+          width: 1024
+          heads: 16
+          layers: 24
+        layer: "penultimate"
+      controlnet_cfg:
+        use_checkpoint: True
+        image_size: 32 # unused
+        in_channels: 4
+        hint_channels: 4
+        model_channels: 320
+        attention_resolutions: [ 4, 2, 1 ]
+        num_res_blocks: 2
+        channel_mult: [ 1, 2, 4, 4 ]
+        num_head_channels: 64 # need to fix for flash-attn
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: 1
+        context_dim: 1024
+        legacy: False
+
+  swinir:
+    target: diffbir.model.swinir.SwinIR
+    params:
+      img_size: 64
+      patch_size: 1
+      in_chans: 3
+      embed_dim: 180
+      depths: [6, 6, 6, 6, 6, 6, 6, 6]
+      num_heads: [6, 6, 6, 6, 6, 6, 6, 6]
+      window_size: 8
+      mlp_ratio: 2
+      sf: 8
+      img_range: 1.0
+      upsampler: "nearest+conv"
+      resi_connection: "1conv"
+      unshuffle: True
+      unshuffle_scale: 8
+
+  diffusion:
+    target: diffbir.model.gaussian_diffusion.Diffusion
+    params:
+      linear_start: 0.00085
+      linear_end: 0.0120
+      timesteps: 1000
+      zero_snr: True
+      parameterization: v
+
+dataset:
+  train:
+    target: diffbir.dataset.realesrgan.RealESRGANDataset
+    params:
+      # Path to the file list.
+      file_metas:
+        # The training set is formatted as a parquet file.
+        # Each row contains file path, long caption and short caption of a high-quality image.
+        - file_list: 
+          image_path_key: image_path
+          short_prompt_key: llava_short
+          long_prompt_key: llava_long
+
+      p_long_prompt: 0.2
+
+      file_backend_cfg:
+        target: diffbir.dataset.file_backend.HardDiskBackend
+
+      out_size: 512
+      crop_type: none
+
+      use_hflip: false
+      use_rot: false
+
+      blur_kernel_size: 21
+      kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+      kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+      sinc_prob: 0.1
+      blur_sigma: [0.2, 3]
+      betag_range: [0.5, 4]
+      betap_range: [1, 2]
+
+      blur_kernel_size2: 21
+      kernel_list2: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+      kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+      sinc_prob2: 0.1
+      blur_sigma2: [0.2, 1.5]
+      betag_range2: [0.5, 4]
+      betap_range2: [1, 2]
+
+      final_sinc_prob: 0.8
+
+      p_empty_prompt: 0.2
+
+batch_transform:
+  target: diffbir.dataset.batch_transform.RealESRGANBatchTransform
+  params:
+    use_sharpener: true
+    # Queue size of training pool, this should be multiples of batch_size (per GPU).
+    queue_size: 256
+    # the first degradation process
+    resize_prob: [0.2, 0.7, 0.1] # up, down, keep
+    resize_range: [0.15, 1.5]
+    gaussian_noise_prob: 0.5
+    noise_range: [1, 30]
+    poisson_scale_range: [0.05, 3]
+    gray_noise_prob: 0.4
+    jpeg_range: [30, 95]
+
+    # the second degradation process
+    stage2_scale: 4
+    second_blur_prob: 0.8
+    resize_prob2: [0.3, 0.4, 0.3] # up, down, keep
+    resize_range2: [0.3, 1.2]
+    gaussian_noise_prob2: 0.5
+    noise_range2: [1, 25]
+    poisson_scale_range2: [0.05, 2.5]
+    gray_noise_prob2: 0.4
+    jpeg_range2: [30, 95]
+
+train:
+  # pretrained sd v2.1-zsnr path
+  sd_path: 
+  # experiment directory path
+  exp_dir: 
+  # stage 1 swinir path.
+  # For DiffBIR v2.1, we use SwinIR trained on ImageNet-1k with RealESRGAN degradation.
+  swinir_path: 
+  learning_rate: 1e-5
+  batch_size: 512
+  num_workers: 16
+  train_steps: 1000000
+  log_every: 100
+  ckpt_every: 10000
+  image_every: 1000
+  resume: 
+  noise_aug_timestep: 200
