@@ -216,7 +216,7 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
         
         images=[]
         for i ,j in zip(x,condition):
-            if wavelet:
+            if not wavelet:
                 hq=vae.decode(i)
             else:
                 image=vae.decode(i).squeeze(0)#torch.Size([1024, 1024, 3])
