@@ -249,30 +249,22 @@ def load_flow_model(name,ckpt_path,cf_model):
     with ctx():
         model = Flux(configs[name].params).to(torch.bfloat16)
 
-    from comfy.model_management import total_vram,total_ram
-    print("Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, total_ram))
-    max_memory=int(total_vram/1000.0)-2 # 设置最大显存
     if ckpt_path is not None:
         model = load_checkpoint_and_dispatch(
             model,
             ckpt_path,
-            device_map="auto",  # 自动分配设备
-            max_memory={0: f"{max_memory}GiB", "cpu": "20GiB"},  # 指定每个设备的最大内存
-            offload_folder="offload",  # 磁盘卸载文件夹
+            device_map="auto", 
             dtype=torch.bfloat16
         )   
     else:
         original_sd = cf_model.model.diffusion_model.state_dict()
-        
         load_checkpoint_and_dispatch_(
             model,
             original_sd,
-            device_map="auto",  # 自动分配设备
-            max_memory={0: f"{max_memory}GiB", "cpu": "20GiB"},  # 指定每个设备的最大内存
-            offload_folder="offload",  # 磁盘卸载文件夹
+            device_map="auto",  
             dtype=torch.bfloat16
         )   
-        #print("Loaded checkpoint",original_sd.keys())
+
         del cf_model
         del original_sd
         gc.collect()
