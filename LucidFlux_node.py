@@ -181,9 +181,15 @@ class LucidFlux_SM_Encode(io.ComfyNode):
         inp_cond=get_cond(positive,emb_path,height,width,device)      
         postive=preprocess_data(state_dict,CLIP_VISION,tensor_list, inp_cond,device)
         cf_models=mm.loaded_models()
-        for model in cf_models:   
-            model.unpatch_model(device_to=torch.device("cpu"))
+        try:
+            for pipe in cf_models:   
+                pipe.unpatch_model(device_to=torch.device("cpu"))
+                print(f"Unpatching models.{pipe}")
+        except: pass
         mm.soft_empty_cache()
+        torch.cuda.empty_cache()
+        max_gpu_memory = torch.cuda.max_memory_allocated()
+        print(f"After Max GPU memory allocated: {max_gpu_memory / 1000 ** 3:.2f} GB")
         return io.NodeOutput(postive)
 
 
@@ -213,7 +219,9 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
         pipe=model.get("model")
         dual_condition_branch=model.get("dual_condition_branch")
         x=lucidflux_inference(pipe,dual_condition_branch,condition,cfg,steps,seed,device,model.get("is_schnell",False)) #torch.Size([1, 16, 128, 128])
-        
+        pipe=None
+        del pipe
+        torch.cuda.empty_cache()
         images=[]
         for i ,j in zip(x,condition):
             if not wavelet:
