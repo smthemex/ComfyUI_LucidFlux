@@ -212,6 +212,7 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
                 io.Boolean.Input("wavelet", default=True),
                 io.Conditioning.Input("condition"),
                 io.Boolean.Input("use_mmgp", default=True),
+                io.Boolean.Input("mmgp_quantize", default=True),
                 io.Int.Input("profile_number", default=4, min=1, max=5,step=1),
 
             ],
@@ -221,16 +222,15 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition,use_mmgp,profile_number ) -> io.NodeOutput:
+    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition,use_mmgp,mmgp_quantize,profile_number ) -> io.NodeOutput:
         pipe=model.get("model")
         user_accelerate=model.get("user_accelerate",True)
-        use_quantize=model.get("use_quantize",True)
         if not user_accelerate:
             if use_mmgp:
                 from mmgp import offload as offloadobj
                 pipeline = {"transformer": model, }
                 # offloadobj.profile(pipe, quantizeTransformer = False,  profile_no = 1 ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
-                offloadobj.profile(pipeline, quantizeTransformer = use_quantize,  extraModelsToQuantize = [], profile_no = profile_number, ) 
+                offloadobj.profile(pipeline, quantizeTransformer = mmgp_quantize,  extraModelsToQuantize = [], profile_no = profile_number, ) 
                 del pipeline
             else:
                 pipe.to(device)
