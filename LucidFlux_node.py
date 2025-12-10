@@ -38,18 +38,20 @@ class LucidFlux_SM_Model(io.ComfyNode):
             inputs=[
                 io.Combo.Input("LucidFlux",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "lucid" in i.lower()]),
                 io.Combo.Input("diffusion_models",options= ["none"] + folder_paths.get_filename_list("diffusion_models")),
-                io.Boolean.Input("user_accelerate", default=True),
+                io.Boolean.Input("use_accelerate", default=True),
                 io.Boolean.Input("use_quantize", default=False),
+                io.Boolean.Input("use_mmgp", default=False),
+                io.Boolean.Input("mmgp_quantize", default=False),
+                io.Int.Input("profile_number", default=2, min=1, max=5,step=1),
                 io.Model.Input("cf_model", optional=True),
-                
             ],
             outputs=[
-                io.Custom("LucidFlux_SM").Output(),
-                io.Custom("LucidFlux_SD").Output(),
+                io.Custom("LucidFlux_SM").Output(display_name="model"),
+                io.Custom("LucidFlux_SD").Output(display_name="state"),
                 ],
             )
     @classmethod
-    def execute(cls, LucidFlux,diffusion_models,user_accelerate,use_quantize,cf_model=None) -> io.NodeOutput:
+    def execute(cls, LucidFlux,diffusion_models,use_accelerate,use_quantize,use_mmgp,mmgp_quantize,profile_number,cf_model=None) -> io.NodeOutput:
         is_dev="flux-dev" if "dev" in diffusion_models.lower() else "flux-schnell"
         if cf_model is not None:
             if "guidance_in.in_layer.weight" in cf_model.model.diffusion_model.state_dict().keys():
@@ -69,7 +71,18 @@ class LucidFlux_SM_Model(io.ComfyNode):
             "checkpoint":LucidFlux_path,
         }
         args=OmegaConf.create(origin_dict)
-        model,state=load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,use_quantize,device,)
+        model,state=load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,device,)
+        if use_quantize:
+            mmgp_quantize=False
+        if use_accelerate and use_mmgp:
+            print("if use accelerate ,can not use_mmgp")
+            use_mmgp=False
+        if use_mmgp:
+            from mmgp import offload 
+            pipeline = { "transformer": model }
+            offload.profile(pipeline, quantizeTransformer = mmgp_quantize,  profile_no = profile_number ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
+        state["use_mmgp"]=use_mmgp
+        model.use_mmgp=use_mmgp
         return io.NodeOutput(model,state)
     
 
@@ -142,8 +155,8 @@ class LucidFlux_SM_Cond(io.ComfyNode):
                 io.Custom("LucidFlux_SM").Input("model"),
                 io.Combo.Input("lora1",options= ["none"] + folder_paths.get_filename_list("loras")),
                 io.Combo.Input("lora2",options= ["none"] + folder_paths.get_filename_list("loras")),
-                io.Float.Input("scale1", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.slider),
-                io.Float.Input("scale2", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.slider),
+                io.Float.Input("scale1", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.number),
+                io.Float.Input("scale2", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.number),
                 ],
             outputs=[io.Custom("LucidFlux_SM").Output()],
         )
@@ -165,7 +178,7 @@ class LucidFlux_SM_Encode(io.ComfyNode):
             display_name="LucidFlux_SM_Encode",
             category="LucidFlux_SM",
             inputs=[
-                io.Custom("LucidFlux_SD").Input("state_dict"),
+                io.Custom("LucidFlux_SD").Input("state"),
                 io.ClipVision.Input("CLIP_VISION"),
                 io.Image.Input("image"),#  B H W C C=3
                 io.Combo.Input("emb",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "prompt" in i.lower() ]),
@@ -176,13 +189,13 @@ class LucidFlux_SM_Encode(io.ComfyNode):
                 ],
         )
     @classmethod
-    def execute(cls, state_dict,CLIP_VISION, image,emb,positive=None) -> io.NodeOutput:
+    def execute(cls, state,CLIP_VISION, image,emb,positive=None) -> io.NodeOutput:
         emb_path=folder_paths.get_full_path("LucidFlux", emb) if emb != "none" else None
         _,height,width,_=image.shape
         tensor_list=tensor2list(image)
         tensor_list=[i.to(device) for i in tensor_list]
         inp_cond=get_cond(positive,emb_path,height,width,device)      
-        postive=preprocess_data(state_dict,CLIP_VISION,tensor_list, inp_cond,device)
+        postive=preprocess_data(state,CLIP_VISION,tensor_list, inp_cond,device)
         cf_models=mm.loaded_models()
         try:
             for pipe in cf_models:   
@@ -211,35 +224,26 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
                 io.Float.Input("cfg", default=4.0, min=0.0, max=100.0, step=0.1, round=0.01,),
                 io.Boolean.Input("wavelet", default=True),
                 io.Conditioning.Input("condition"),
-                io.Boolean.Input("use_mmgp", default=True),
-                io.Boolean.Input("mmgp_quantize", default=True),
-                io.Int.Input("profile_number", default=4, min=1, max=5,step=1),
-
+        
             ],
             outputs=[
                 io.Image.Output(display_name="Image"),
             ],
         )
-    
     @classmethod
-    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition,use_mmgp,mmgp_quantize,profile_number ) -> io.NodeOutput:
-        pipe=model.get("model")
-        user_accelerate=model.get("user_accelerate",True)
-        if not user_accelerate:
-            if use_mmgp:
-                from mmgp import offload 
-                pipeline = { "transformer": pipe, }
-                offload.profile(pipeline, quantizeTransformer = mmgp_quantize,  profile_no = profile_number ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
-            else:
-                pipe.to(device)
+    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition, ) -> io.NodeOutput:
+
+        use_accelerate=condition.get("use_accelerate",True)
+        use_mmgp=condition.get("use_mmgp",True)
+        if not use_accelerate and not use_mmgp:
+            model.to(device)
             
-        dual_condition_branch=model.get("dual_condition_branch")
-        x=lucidflux_inference(pipe,dual_condition_branch,condition,cfg,steps,seed,device,model.get("is_schnell",False)) #torch.Size([1, 16, 128, 128])
-        pipe=None
-        del pipe
+        dual_condition_branch=condition.get("dual_condition_branch")
+        x=lucidflux_inference(model,dual_condition_branch,condition["data_list"],cfg,steps,seed,device,condition.get("is_schnell",False)) #torch.Size([1, 16, 128, 128])
+   
         torch.cuda.empty_cache()
         images=[]
-        for i ,j in zip(x,condition):
+        for i ,j in zip(x,condition["data_list"]):
             if not wavelet:
                 hq=vae.decode(i)
             else:
