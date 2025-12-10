@@ -227,11 +227,9 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
         user_accelerate=model.get("user_accelerate",True)
         if not user_accelerate:
             if use_mmgp:
-                from mmgp import offload as offloadobj
-                pipeline = {"transformer": model, }
-                # offloadobj.profile(pipe, quantizeTransformer = False,  profile_no = 1 ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
-                offloadobj.profile(pipeline, quantizeTransformer = mmgp_quantize,  extraModelsToQuantize = [], profile_no = profile_number, ) 
-                del pipeline
+                from mmgp import offload 
+                pipeline = { "transformer": pipe, }
+                offload.profile(pipeline, quantizeTransformer = mmgp_quantize,  profile_no = profile_number ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
             else:
                 pipe.to(device)
             
@@ -252,8 +250,7 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
                 hq=hq.unsqueeze(0).permute(0, 2, 3, 1)
             images.append(hq)
         img = torch.cat(images, dim=0)
-        if not user_accelerate:  
-            pipe.to("cpu")
+       
         return io.NodeOutput(img)
 
 
