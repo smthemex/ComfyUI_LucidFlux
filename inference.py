@@ -328,12 +328,12 @@ def infer_diffbir_model(model,input_pli_list,torch_device,):
     image_tensor=torch.cat(images,dim=0)
     return image_tensor
 
-def load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,use_quantize,torch_device):
+def load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,torch_device):
     name =args.name #"flux-dev"
     #offload = args.offload
     is_schnell = name == "flux-schnell"
     
-    model=load_flow_model(name,ckpt_path,cf_model,user_accelerate,use_quantize)
+    model=load_flow_model(name,ckpt_path,cf_model,use_accelerate,use_quantize)
 
     condition_lq=load_single_condition_branch(name, torch_device).to(torch.bfloat16)
 
@@ -367,8 +367,8 @@ def load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,use_quantize,to
     
     state_dict=checkpoint["connector"]
     del checkpoint
-    pipe={"model":model,"dual_condition_branch":dual_condition_branch,"is_schnell":is_schnell,"user_accelerate":user_accelerate,"use_quantize":use_quantize}
-    return pipe,state_dict
+    cond={"state_dict":state_dict,"dual_condition_branch":dual_condition_branch,"is_schnell":is_schnell,"use_accelerate":use_accelerate,"use_quantize":use_quantize}
+    return model,cond
 
 def tensor2image(tensor):
     tensor = tensor.cpu()
@@ -380,8 +380,8 @@ def preprocess_data(state_dict,siglip_model,tensor_list, inp_cond,torch_device):
 
     dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
 
-    redux_image_encoder = load_redux_image_encoder(torch_device, dtype, state_dict)
-    del state_dict
+    redux_image_encoder = load_redux_image_encoder(torch_device, dtype, state_dict["state_dict"])
+   
     data_list=[]
     for ci_pre in tensor_list: #( 1HW3 )
         #filename = os.path.basename(img_path).split(".")[0]
@@ -417,7 +417,8 @@ def preprocess_data(state_dict,siglip_model,tensor_list, inp_cond,torch_device):
             data={"siglip_txt": siglip_txt, "siglip_txt_ids": siglip_txt_ids,"inp_cond":inp_cond,"txt":txt,"txt_ids":txt_ids,"size":(height, width),
                   "condition_cond":condition_cond, "condition_cond_ldr": condition_cond_ldr,"ci_pre_origin":ci_pre_origin}
         data_list.append(data)
-    return data_list
+    state_dict["data_list"]=data_list
+    return state_dict
 
 def prepare_with_embeddings(img, precomputed_txt, precomputed_vec):
     """
@@ -493,15 +494,19 @@ def load_condition_model(model,lora_paths,lora_scales):
     try:
         if len(lora_paths)!=len(lora_scales): #sacles  
             lora_scales = lora_paths[:1]
-        for i, (lora_path, lora_scale) in enumerate(zip(lora_paths, lora_scales)):
-            if lora_path is not None:
-                try:
-                    model_int = model.get("model")
-                    _apply_lora_weights(model_int, lora_path, lora_scale)
-                    #print(f"Successfully applied LoRA {i+1}: {lora_path} with scale {lora_scale}")
-                    model["model"] = model_int
-                except Exception as e:
-                    print(f"Failed to apply LoRA {i+1} ({lora_path}): {str(e)}")
+        if model.use_mmgp:
+            from mmgp.offload import load_loras_into_model
+            try:
+                load_loras_into_model(model, lora_paths, lora_scales, activate_all_loras = True)
+            except:
+                print("Failed to load LoRAs into MMGP model")
+        else:
+            for i, (lora_path, lora_scale) in enumerate(zip(lora_paths, lora_scales)):
+                if lora_path is not None:
+                    try:
+                        _apply_lora_weights(model, lora_path, lora_scale)
+                    except Exception as e:
+                        print(f"Failed to apply LoRA {i+1} ({lora_path}): {str(e)}")
         return model
         
     except Exception as e:
