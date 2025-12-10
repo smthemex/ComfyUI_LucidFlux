@@ -38,7 +38,9 @@ class LucidFlux_SM_Model(io.ComfyNode):
             inputs=[
                 io.Combo.Input("LucidFlux",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "lucid" in i.lower()]),
                 io.Combo.Input("diffusion_models",options= ["none"] + folder_paths.get_filename_list("diffusion_models")),
+                io.Boolean.Input("user_accelerate", default=True),
                 io.Model.Input("cf_model", optional=True),
+                
             ],
             outputs=[
                 io.Custom("LucidFlux_SM").Output(),
@@ -46,7 +48,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
                 ],
             )
     @classmethod
-    def execute(cls, LucidFlux,diffusion_models,cf_model=None) -> io.NodeOutput:
+    def execute(cls, LucidFlux,diffusion_models,user_accelerate,cf_model=None) -> io.NodeOutput:
         is_dev="flux-dev" if "dev" in diffusion_models.lower() else "flux-schnell"
         if cf_model is not None:
             if "guidance_in.in_layer.weight" in cf_model.model.diffusion_model.state_dict().keys():
@@ -66,7 +68,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
             "checkpoint":LucidFlux_path,
         }
         args=OmegaConf.create(origin_dict)
-        model,state=load_lucidflux_model(args,ckpt_path,cf_model,device,)
+        model,state=load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,device,)
         return io.NodeOutput(model,state)
     
 
@@ -217,6 +219,9 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
     @classmethod
     def execute(cls, model,vae, steps,seed, cfg,wavelet, condition, ) -> io.NodeOutput:
         pipe=model.get("model")
+        user_accelerate=model.get("user_accelerate",True)
+        if not user_accelerate:
+            pipe.to(device)
         dual_condition_branch=model.get("dual_condition_branch")
         x=lucidflux_inference(pipe,dual_condition_branch,condition,cfg,steps,seed,device,model.get("is_schnell",False)) #torch.Size([1, 16, 128, 128])
         pipe=None
@@ -234,6 +239,8 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
                 hq=hq.unsqueeze(0).permute(0, 2, 3, 1)
             images.append(hq)
         img = torch.cat(images, dim=0)
+        if not user_accelerate:  
+            pipe.to("cpu")
         return io.NodeOutput(img)
 
 
