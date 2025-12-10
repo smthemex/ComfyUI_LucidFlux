@@ -39,6 +39,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
                 io.Combo.Input("LucidFlux",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "lucid" in i.lower()]),
                 io.Combo.Input("diffusion_models",options= ["none"] + folder_paths.get_filename_list("diffusion_models")),
                 io.Boolean.Input("user_accelerate", default=True),
+                io.Boolean.Input("use_quantize", default=False),
                 io.Model.Input("cf_model", optional=True),
                 
             ],
@@ -48,7 +49,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
                 ],
             )
     @classmethod
-    def execute(cls, LucidFlux,diffusion_models,user_accelerate,cf_model=None) -> io.NodeOutput:
+    def execute(cls, LucidFlux,diffusion_models,user_accelerate,use_quantize,cf_model=None) -> io.NodeOutput:
         is_dev="flux-dev" if "dev" in diffusion_models.lower() else "flux-schnell"
         if cf_model is not None:
             if "guidance_in.in_layer.weight" in cf_model.model.diffusion_model.state_dict().keys():
@@ -68,7 +69,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
             "checkpoint":LucidFlux_path,
         }
         args=OmegaConf.create(origin_dict)
-        model,state=load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,device,)
+        model,state=load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,use_quantize,device,)
         return io.NodeOutput(model,state)
     
 
@@ -210,6 +211,9 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
                 io.Float.Input("cfg", default=4.0, min=0.0, max=100.0, step=0.1, round=0.01,),
                 io.Boolean.Input("wavelet", default=True),
                 io.Conditioning.Input("condition"),
+                io.Boolean.Input("use_mmgp", default=True),
+                io.Int.Input("profile_number", default=4, min=1, max=5,step=1),
+
             ],
             outputs=[
                 io.Image.Output(display_name="Image"),
@@ -217,11 +221,20 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition, ) -> io.NodeOutput:
+    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition,use_mmgp,profile_number ) -> io.NodeOutput:
         pipe=model.get("model")
         user_accelerate=model.get("user_accelerate",True)
+        use_quantize=model.get("use_quantize",True)
         if not user_accelerate:
-            pipe.to(device)
+            if use_mmgp:
+                from mmgp import offload as offloadobj
+                pipeline = {"transformer": model, }
+                # offloadobj.profile(pipe, quantizeTransformer = False,  profile_no = 1 ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
+                offloadobj.profile(pipeline, quantizeTransformer = use_quantize,  extraModelsToQuantize = [], profile_no = profile_number, ) 
+                del pipeline
+            else:
+                pipe.to(device)
+            
         dual_condition_branch=model.get("dual_condition_branch")
         x=lucidflux_inference(pipe,dual_condition_branch,condition,cfg,steps,seed,device,model.get("is_schnell",False)) #torch.Size([1, 16, 128, 128])
         pipe=None
