@@ -328,12 +328,12 @@ def infer_diffbir_model(model,input_pli_list,torch_device,):
     image_tensor=torch.cat(images,dim=0)
     return image_tensor
 
-def load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,torch_device):
+def load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,use_quantize,torch_device):
     name =args.name #"flux-dev"
     #offload = args.offload
     is_schnell = name == "flux-schnell"
     
-    model=load_flow_model(name,ckpt_path,cf_model,user_accelerate)
+    model=load_flow_model(name,ckpt_path,cf_model,user_accelerate,use_quantize)
 
     condition_lq=load_single_condition_branch(name, torch_device).to(torch.bfloat16)
 
@@ -367,7 +367,7 @@ def load_lucidflux_model(args,ckpt_path,cf_model,user_accelerate,torch_device):
     
     state_dict=checkpoint["connector"]
     del checkpoint
-    pipe={"model":model,"dual_condition_branch":dual_condition_branch,"is_schnell":is_schnell,"user_accelerate":user_accelerate}
+    pipe={"model":model,"dual_condition_branch":dual_condition_branch,"is_schnell":is_schnell,"user_accelerate":user_accelerate,"use_quantize":use_quantize}
     return pipe,state_dict
 
 def tensor2image(tensor):
