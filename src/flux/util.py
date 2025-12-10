@@ -235,7 +235,7 @@ def load_from_repo_id(repo_id, checkpoint_name):
     sd = load_sft(ckpt_path, device='cpu')
     return sd
 
-def load_flow_model(name,ckpt_path,cf_model,user_accelerate: bool = True,device: str='cpu'):
+def load_flow_model(name,ckpt_path,cf_model,user_accelerate: bool = True,use_quantize: bool = False,device: str='cpu'):
     # Loading Flux
     print("Init model")
     #ckpt_path = configs[name].ckpt_path
@@ -270,23 +270,35 @@ def load_flow_model(name,ckpt_path,cf_model,user_accelerate: bool = True,device:
             del original_sd
             gc.collect()
     else:
+
         model = Flux(configs[name].params).to(torch.bfloat16)
-        json_path = os.path.join(folder_paths.base_path, "custom_nodes/ComfyUI_LucidFlux/config.json") #config is for pass block
-        # Import here to avoid heavy quanto/transformers side effects at module import time
-      
-        if ckpt_path is not None:
-            sd = load_sft(ckpt_path, device='cpu')
+        if use_quantize:
+            json_path = os.path.join(folder_paths.base_path, "custom_nodes/ComfyUI_LucidFlux/config.json") #config is for pass block
+            # Import here to avoid heavy quanto/transformers side effects at module import time
+        
+            if ckpt_path is not None:
+                sd = load_sft(ckpt_path, device='cpu')
+            else:
+                sd = cf_model.model.diffusion_model.state_dict()
+                del cf_model
+            with open(json_path, "r") as f:
+                quantization_map = json.load(f)
+            print("Start a quantization process...")
+            from optimum.quanto import requantize
+            requantize(model, sd, quantization_map, device=device)
+            print("Model is quantized!")
+            del sd
+            gc.collect()
         else:
-            sd = cf_model.model.diffusion_model.state_dict()
-            del cf_model
-        with open(json_path, "r") as f:
-            quantization_map = json.load(f)
-        print("Start a quantization process...")
-        from optimum.quanto import requantize
-        requantize(model, sd, quantization_map, device=device)
-        print("Model is quantized!")
-        del sd
-        gc.collect()
+            if ckpt_path is not None:
+                sd = load_sft(ckpt_path, device='cpu')
+            else:
+                sd = cf_model.model.diffusion_model.state_dict()
+                del cf_model
+            missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+            print_load_warning(missing, unexpected)
+            del sd
+            gc.collect()
     return model
 
 def load_flow_model2(name: str, device: str, hf_download: bool = True):
