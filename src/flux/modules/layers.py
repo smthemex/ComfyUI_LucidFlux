@@ -57,7 +57,13 @@ class MLPEmbedder(nn.Module):
         self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=True)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.out_layer(self.silu(self.in_layer(x)))
+        x = self.in_layer(x)
+        # if x.dtype ==torch.float8_e4m3fn:
+        #     x = x.to(torch.bfloat16)
+        x= self.silu(x)
+        # if x.dtype !=self.out_layer.weight.dtype:
+        #     x = x.to(self.out_layer.weight.dtype)
+        return self.out_layer(x)
 
 
 class RMSNorm(torch.nn.Module):

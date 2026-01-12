@@ -141,6 +141,13 @@ def denoise_lucidflux(
     condition_cond_ldr=None,
 ):
     # this is ignored for schnell
+    offload_mode= model.block_offload if hasattr(model, 'block_offload') else False
+    if offload_mode: 
+        from .model import BlockGPUManager        
+        gpu_manager = BlockGPUManager(device="cuda")
+        gpu_manager.setup_for_inference(model)
+    else:
+        gpu_manager = None
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
     timestep_pairs = zip(timesteps[:-1], timesteps[1:])
     timestep_pairs = tqdm(timestep_pairs, total=len(timesteps)-1, desc="Denoising")
@@ -176,11 +183,14 @@ def denoise_lucidflux(
             y=vec_in,
             timesteps=t_vec,
             guidance=guidance_vec,
-            block_controlnet_hidden_states=[i.to(img.device, dtype) for i in block_res_samples]
+            block_controlnet_hidden_states=[i.to(img.device, dtype) for i in block_res_samples],
+            gpu_manager=gpu_manager,
         )
 
         img = img + (t_prev - t_curr) * pred
 
+    if offload_mode:
+        gpu_manager.unload_all_blocks_to_cpu()
     return img
     
 def unpack(x: Tensor, height: int, width: int) -> Tensor:

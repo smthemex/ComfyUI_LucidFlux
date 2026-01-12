@@ -235,66 +235,88 @@ def load_from_repo_id(repo_id, checkpoint_name):
     sd = load_sft(ckpt_path, device='cpu')
     return sd
 
-def load_flow_model(name,ckpt_path,cf_model,use_accelerate: bool = True,use_quantize: bool = False,device: str='cpu'):
+
+def load_flow_model(name,ckpt_path,cf_model,use_accelerate: bool = True,use_quantize: bool = False,block_offload=True,device: str='cpu'):
     # Loading Flux
     print("Init model")
     #ckpt_path = configs[name].ckpt_path
-    if use_accelerate:
+    if block_offload: #keep model on cpu
         from contextlib import nullcontext
         try:
-            from accelerate import init_empty_weights,load_checkpoint_and_dispatch
+            from accelerate import init_empty_weights
             is_accelerate_available = True
         except:
             is_accelerate_available = False
         ctx = init_empty_weights if is_accelerate_available else nullcontext
         with ctx():
             model = Flux(configs[name].params).to(torch.bfloat16)
-
+        #model = Flux(configs[name].params).to(torch.bfloat16)
         if ckpt_path is not None:
-            model = load_checkpoint_and_dispatch(
-                model,
-                ckpt_path,
-                device_map="auto", 
-                dtype=torch.bfloat16
-            )   
+            sd = load_sft(ckpt_path, device='cpu')
         else:
-            original_sd = cf_model.model.diffusion_model.state_dict()
-            load_checkpoint_and_dispatch_(
-                model,
-                original_sd,
-                device_map="auto",  
-                dtype=torch.bfloat16
-            )   
-
+            sd = cf_model.model.diffusion_model.state_dict()
             del cf_model
-            del original_sd
-            gc.collect()
-    else:
-        model = Flux(configs[name].params).to(torch.bfloat16)
-        if use_quantize:
-            json_path = os.path.join(folder_paths.base_path, "custom_nodes/ComfyUI_LucidFlux/config.json") #config is for pass block
-            # Import here to avoid heavy quanto/transformers side effects at module import time
-            if ckpt_path is not None:
-                sd = load_sft(ckpt_path, device='cpu')
-            else:
-                sd = cf_model.model.diffusion_model.state_dict()
-                del cf_model
-            with open(json_path, "r") as f:
-                quantization_map = json.load(f)
-            print("Start a quantization process...")
-            from optimum.quanto import requantize
-            requantize(model, sd, quantization_map, device=device)
-            print("Model is quantized!")  
-        else:
-            if ckpt_path is not None:
-                sd = load_sft(ckpt_path, device='cpu')
-            else:
-                sd = cf_model.model.diffusion_model.state_dict()
-                del cf_model
-            missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
-            print_load_warning(missing, unexpected)
+        missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
         del sd
-        gc.collect()
+
+        print_load_warning(missing, unexpected)
+    else:
+        if use_accelerate:
+            from contextlib import nullcontext
+            try:
+                from accelerate import init_empty_weights,load_checkpoint_and_dispatch
+                is_accelerate_available = True
+            except:
+                is_accelerate_available = False
+            ctx = init_empty_weights if is_accelerate_available else nullcontext
+            with ctx():
+                model = Flux(configs[name].params).to(torch.bfloat16)
+
+            if ckpt_path is not None:
+                model = load_checkpoint_and_dispatch(
+                    model,
+                    ckpt_path,
+                    device_map="auto", 
+                    dtype=torch.bfloat16
+                )   
+            else:
+                original_sd = cf_model.model.diffusion_model.state_dict()
+                load_checkpoint_and_dispatch_(
+                    model,
+                    original_sd,
+                    device_map="auto",  
+                    dtype=torch.bfloat16
+                )   
+
+                del cf_model
+                del original_sd
+                gc.collect()
+        else:
+            model = Flux(configs[name].params).to(torch.bfloat16)
+            if use_quantize:
+                json_path = os.path.join(folder_paths.base_path, "custom_nodes/ComfyUI_LucidFlux/config.json") #config is for pass block
+                # Import here to avoid heavy quanto/transformers side effects at module import time
+                if ckpt_path is not None:
+                    sd = load_sft(ckpt_path, device='cpu')
+                else:
+                    sd = cf_model.model.diffusion_model.state_dict()
+                    del cf_model
+                with open(json_path, "r") as f:
+                    quantization_map = json.load(f)
+                print("Start a quantization process...")
+                from optimum.quanto import requantize
+                requantize(model, sd, quantization_map, device=device)
+                print("Model is quantized!")  
+            else:
+                if ckpt_path is not None:
+                    sd = load_sft(ckpt_path, device='cpu')
+                else:
+                    sd = cf_model.model.diffusion_model.state_dict()
+                    del cf_model
+                missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+                print_load_warning(missing, unexpected)
+            del sd
+            gc.collect()
     return model
 
 
