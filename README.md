@@ -2,8 +2,11 @@
  [LucidFlux](https://github.com/W2GenAI-Lab/LucidFlux): Caption-Free Universal Image Restoration with a Large-Scale Diffusion Transformer，you can use it in ComfyUI
 
 # Update
-* 25/12/10 新增量化和mmgp内存卸载，当使用fp16的flux模型时，可以只开启mmgp，或者开启mmgp 加mmgp 量化，当使用fp8的模型比如KJ的或者官方的，只能使用“accelerate开启量化” 或者 “开启mmgp以及开启use_quantize”，之前Linux环境24G都OOM的，可以试试第二张方法，否则会遇见dtype不匹配的诸多错误；
+* 2026.01.12 新增block卸载代码，开启block offload 后，显存峰值6G不到，推理时长自然会延长，fp8模型，转化也耗时，所以bf16模型反而会更快； 
+* Add block offload code. After enabling block offload, the peak video memory usage is less than 6G, naturally extending the inference time. For fp8 models, conversion also takes time, so bf16 models are actually faster；
 
+# previous
+* 25/12/10 新增量化和mmgp内存卸载，当使用fp16的flux模型时，可以只开启mmgp，或者开启mmgp 加mmgp 量化，当使用fp8的模型比如KJ的或者官方的，只能使用“accelerate开启量化” 或者 “开启mmgp以及开启use_quantize”，之前Linux环境24G都OOM的，可以试试第二个方法，否则会遇见dtype不匹配的诸多错误；
 * 新增Diffbir节点，支持Diffbir v2.1 超分，人脸优化，由此diffbir预处理也可以变成可选，如果你输入的图片只是比较模糊的那种，如果不模糊，可以用参考节点的加模糊来精炼，当然 你可以把Diffbir节点当成独立的节点，其超分去模糊也还行；常规使用v2.1超分，推荐选择sr ，使用原生v1，则选择none；
 * Added Diffbir node, supporting Diffbir v2.1 super-resolution and face optimization. As a result, Diffbir preprocessing can also be optional. If the image you input is relatively blurry, you can use the reference node’s blur addition for refinement. Of course, you can treat the Diffbir node as an independent node, and its super-resolution can also handle deblurring. For regular use of v2.1 super-resolution, it is recommended to select 'sr'; for using native v1, select 'none'.  
 * 图像的小波重建功能外置，在sampler节点；
