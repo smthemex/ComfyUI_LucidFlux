@@ -38,6 +38,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
             inputs=[
                 io.Combo.Input("LucidFlux",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "lucid" in i.lower()]),
                 io.Combo.Input("diffusion_models",options= ["none"] + folder_paths.get_filename_list("diffusion_models")),
+                io.Boolean.Input("block_offload", default=True),
                 io.Boolean.Input("use_accelerate", default=True),
                 io.Boolean.Input("use_quantize", default=False),
                 io.Boolean.Input("use_mmgp", default=False),
@@ -51,7 +52,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
                 ],
             )
     @classmethod
-    def execute(cls, LucidFlux,diffusion_models,use_accelerate,use_quantize,use_mmgp,mmgp_quantize,profile_number,cf_model=None) -> io.NodeOutput:
+    def execute(cls, LucidFlux,diffusion_models,block_offload,use_accelerate,use_quantize,use_mmgp,mmgp_quantize,profile_number,cf_model=None) -> io.NodeOutput:
         is_dev="flux-dev" if "dev" in diffusion_models.lower() else "flux-schnell"
         if cf_model is not None:
             if "guidance_in.in_layer.weight" in cf_model.model.diffusion_model.state_dict().keys():
@@ -71,18 +72,24 @@ class LucidFlux_SM_Model(io.ComfyNode):
             "checkpoint":LucidFlux_path,
         }
         args=OmegaConf.create(origin_dict)
-        model,state=load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,device,)
-        if use_quantize:
-            mmgp_quantize=False
-        if use_accelerate and use_mmgp:
-            print("if use accelerate ,can not use_mmgp")
-            use_mmgp=False
-        if use_mmgp:
-            from mmgp import offload 
-            pipeline = { "transformer": model }
-            offload.profile(pipeline, quantizeTransformer = mmgp_quantize,  profile_no = profile_number ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
-        state["use_mmgp"]=use_mmgp
-        model.use_mmgp=use_mmgp
+
+        model,state=load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,block_offload,device,)
+        if block_offload:
+            model.block_offload=True
+            model.use_mmgp=False
+        else:
+            model.block_offload=False
+            if use_quantize:
+                mmgp_quantize=False
+            if use_accelerate and use_mmgp:
+                print("if use accelerate ,can not use_mmgp")
+                use_mmgp=False
+            if use_mmgp:
+                from mmgp import offload 
+                pipeline = { "transformer": model }
+                offload.profile(pipeline, quantizeTransformer = mmgp_quantize,  profile_no = profile_number ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
+            state["use_mmgp"]=use_mmgp
+            model.use_mmgp=use_mmgp
         return io.NodeOutput(model,state)
     
 
