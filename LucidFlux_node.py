@@ -5,7 +5,8 @@ import numpy as np
 import torch
 import os
 from omegaconf import OmegaConf
-from .model_loader_utils import  tensor2pillist_upscale,tensor2list,tensor_upscale,nomarl_upscale
+from .model_loader_utils import  tensor2pillist_upscale,clear_comfyui_cache
+from .src.flux.util import load_ae
 from .inference import load_lucidflux_model,lucidflux_inference,preprocess_data,get_cond,load_condition_model,load_diffbir_model,infer_diffbir_model
 import folder_paths
 from typing_extensions import override
@@ -13,9 +14,9 @@ from comfy_api.latest import ComfyExtension, io
 import nodes
 import comfy.model_management as mm
 from .src.flux.align_color import wavelet_reconstruction
-
+import torch.nn.functional as F
 MAX_SEED = np.iinfo(np.int32).max
-
+from torchvision.utils import save_image
 device = torch.device(
     "cuda:0") if torch.cuda.is_available() else torch.device(
     "mps") if torch.backends.mps.is_available() else torch.device("cpu")
@@ -39,20 +40,17 @@ class LucidFlux_SM_Model(io.ComfyNode):
                 io.Combo.Input("LucidFlux",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "lucid" in i.lower()]),
                 io.Combo.Input("diffusion_models",options= ["none"] + folder_paths.get_filename_list("diffusion_models")),
                 io.Boolean.Input("block_offload", default=True),
-                io.Boolean.Input("use_accelerate", default=True),
-                io.Boolean.Input("use_quantize", default=False),
-                io.Boolean.Input("use_mmgp", default=False),
-                io.Boolean.Input("mmgp_quantize", default=False),
-                io.Int.Input("profile_number", default=2, min=1, max=5,step=1),
+                io.Combo.Input("model_type",options= ["bf16","f32"] ),
                 io.Model.Input("cf_model", optional=True),
             ],
             outputs=[
-                io.Custom("LucidFlux_SM").Output(display_name="model"),
-                io.Custom("LucidFlux_SD").Output(display_name="state"),
+                io.Model.Output(display_name="model"),
                 ],
             )
     @classmethod
-    def execute(cls, LucidFlux,diffusion_models,block_offload,use_accelerate,use_quantize,use_mmgp,mmgp_quantize,profile_number,cf_model=None) -> io.NodeOutput:
+    def execute(cls, LucidFlux,diffusion_models,block_offload,model_type,cf_model=None) -> io.NodeOutput:
+        clear_comfyui_cache()
+        model_dtype = torch.bfloat16 if model_type == 'bf16' else torch.float32
         is_dev="flux-dev" if "dev" in diffusion_models.lower() else "flux-schnell"
         if cf_model is not None:
             if "guidance_in.in_layer.weight" in cf_model.model.diffusion_model.state_dict().keys():
@@ -64,6 +62,7 @@ class LucidFlux_SM_Model(io.ComfyNode):
         ckpt_path=folder_paths.get_full_path("diffusion_models", diffusion_models) if diffusion_models != "none" else None
         
         assert LucidFlux_path is not None,"need LucidFlux"
+
         origin_dict={
             "name":is_dev,
             "offload":True,
@@ -72,51 +71,11 @@ class LucidFlux_SM_Model(io.ComfyNode):
             "checkpoint":LucidFlux_path,
         }
         args=OmegaConf.create(origin_dict)
-
-        model,state=load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,block_offload,device,)
-        if block_offload:
-            model.block_offload=True
-            model.use_mmgp=False
-        else:
-            model.block_offload=False
-            if use_quantize:
-                mmgp_quantize=False
-            if use_accelerate and use_mmgp:
-                print("if use accelerate ,can not use_mmgp")
-                use_mmgp=False
-            if use_mmgp:
-                from mmgp import offload 
-                pipeline = { "transformer": model }
-                offload.profile(pipeline, quantizeTransformer = mmgp_quantize,  profile_no = profile_number ) # uncomment this line and comment the previous one if you have 24 GB of VRAM and wants faster generation  
-            state["use_mmgp"]=use_mmgp
-            model.use_mmgp=use_mmgp
-        return io.NodeOutput(model,state)
+        model,dual_condition_branch=load_lucidflux_model(args,ckpt_path,cf_model,block_offload,device,model_dtype)
+        model.block_offload=block_offload
+        model.is_schnell = is_dev=="flux-schnell" 
+        return io.NodeOutput({"model": model,  "dual_condition_branch": dual_condition_branch, })
     
-
-
-class LucidFlux_SM_Diff_Model(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        
-        return io.Schema(
-            node_id="LucidFlux_SM_Diff_Model",
-            display_name="LucidFlux_SM_Diff_Model",
-            category="LucidFlux_SM",
-            inputs=[
-                io.Combo.Input("swinir",options= ["none"] + folder_paths.get_filename_list("LucidFlux") ),
-                io.Combo.Input("diffbir_v2", options= ["none" ,"sr", "face", "denoise", "unaligned_face",]),
-            ],
-            outputs=[
-                io.Custom("LucidFlux_SM_diff").Output(),
-                ],
-            )
-    @classmethod
-    def execute(cls, swinir,diffbir_v2) -> io.NodeOutput:
-        swinir_path=folder_paths.get_full_path("LucidFlux", swinir) if swinir != "none" else None
-        assert swinir_path is not None ,"need swinir or diffbir_v2 model"
-        model_=load_diffbir_model(diffbir_v2,swinir_path,node_cr_path,folder_paths.get_output_directory(),torch_device="cpu")
-        model={"model":model_,"is_v2":"none"!= diffbir_v2,"task":diffbir_v2 }
-        return io.NodeOutput(model)
 
 class LucidFlux_SM_Diffbir(io.ComfyNode):
     @classmethod
@@ -126,29 +85,26 @@ class LucidFlux_SM_Diffbir(io.ComfyNode):
             display_name="LucidFlux_SM_Diffbir",
             category="LucidFlux_SM",
             inputs=[
-                io.Custom("LucidFlux_SM_diff").Input("model"),
+                io.Combo.Input("swinir",options= ["none"] + folder_paths.get_filename_list("LucidFlux") ),
                 io.Image.Input("image"),
                 io.Int.Input("width", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=64,display_mode=io.NumberDisplay.number),
                 io.Int.Input("height", default=1024, min=256, max=nodes.MAX_RESOLUTION,step=64,display_mode=io.NumberDisplay.number),
+                io.Boolean.Input("infer_2k", default=False),
             ],
             outputs=[
-                io.Image.Output(display_name="Image"),
+                io.Conditioning.Output(display_name="conditioning"),
+                io.Image.Output(display_name="image"),
                 ],
             )
     @classmethod
-    def execute(cls,model, image,width,height) -> io.NodeOutput:
-        input_pli_list=tensor2pillist_upscale(image,width,height) if not model["is_v2"] else tensor2list(image)
-        task=model.get("task")
-        if model["is_v2"]:
-            if task =="sr":
-                traget_W,traget_H=width//4, height//4     
-            elif task =="denoise" or task==  "face":
-                traget_W,traget_H=width, height   
-            elif task== "unaligned_face":
-                traget_W,traget_H=width//2, height//2   
-            input_pli_list=[nomarl_upscale(i,traget_W,traget_H) for i in input_pli_list]
-        image=infer_diffbir_model(model, input_pli_list,device,)
-        return io.NodeOutput(image)
+    def execute(cls,swinir, image,width,height,infer_2k) -> io.NodeOutput:
+        clear_comfyui_cache()
+        swinir_path=folder_paths.get_full_path("LucidFlux", swinir) if swinir != "none" else None
+        model=load_diffbir_model(swinir_path,)
+        input_pli_list=tensor2pillist_upscale(image,width// 2,height// 2) if infer_2k else tensor2pillist_upscale(image,width,height)
+        images,condition_cond_list,condition_cond_ldr_list=infer_diffbir_model(model, input_pli_list,device,)
+        conditioning = {"condition_cond_list": condition_cond_list,"condition_cond_ldr_list":condition_cond_ldr_list, "images": images,"height":height,"width":width,"infer_2k":infer_2k}
+        return io.NodeOutput(conditioning,torch.cat(images,dim=0).float().cpu())
 
 
 class LucidFlux_SM_Cond(io.ComfyNode):
@@ -159,21 +115,16 @@ class LucidFlux_SM_Cond(io.ComfyNode):
             display_name="LucidFlux_SM_Cond",
             category="LucidFlux_SM",
             inputs=[
-                io.Custom("LucidFlux_SM").Input("model"),
-                io.Combo.Input("lora1",options= ["none"] + folder_paths.get_filename_list("loras")),
-                io.Combo.Input("lora2",options= ["none"] + folder_paths.get_filename_list("loras")),
-                io.Float.Input("scale1", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.number),
-                io.Float.Input("scale2", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.number),
+                io.Model.Input("model"),
+                io.Combo.Input("lora",options= ["none"] + folder_paths.get_filename_list("loras")),
+                io.Float.Input("scale", default=1.0, min=0.0, max=1.0, step=0.1,display_mode=io.NumberDisplay.number),
                 ],
-            outputs=[io.Custom("LucidFlux_SM").Output()],
+            outputs=[io.Model.Output(display_name="model")],
         )
     @classmethod
-    def execute(cls, model,lora1,lora2,scale1,scale2) -> io.NodeOutput:
-        lora1_path=folder_paths.get_full_path("loras", lora1) if lora1!="none" else None
-        lora2_path=folder_paths.get_full_path("loras", lora2) if lora2!="none" else None
-        lora_list=[i for i in [lora1_path,lora2_path] if i is not None]
-        lora_path= lora_list if lora_list else None
-        model=load_condition_model(model,lora_path,[scale1,scale2])
+    def execute(cls, model,lora,scale) -> io.NodeOutput:
+        lora_path=folder_paths.get_full_path("loras", lora) if lora!="none" else None
+        model=load_condition_model(model,lora_path,scale)
         return io.NodeOutput (model)
 
 
@@ -185,10 +136,11 @@ class LucidFlux_SM_Encode(io.ComfyNode):
             display_name="LucidFlux_SM_Encode",
             category="LucidFlux_SM",
             inputs=[
-                io.Custom("LucidFlux_SD").Input("state"),
                 io.ClipVision.Input("CLIP_VISION"),
-                io.Image.Input("image"),#  B H W C C=3
+                io.Conditioning.Input("conditioning"),#  B H W C C=3
                 io.Combo.Input("emb",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "prompt" in i.lower() ]),
+                io.Combo.Input("connector",options= ["none"] + [i for i in folder_paths.get_filename_list("LucidFlux") if "connector" in i.lower() ]),
+                io.Combo.Input("model_type",options= ["bf16","f32"] ),
                 io.Conditioning.Input("positive",optional=True),     
             ],
             outputs=[
@@ -196,24 +148,18 @@ class LucidFlux_SM_Encode(io.ComfyNode):
                 ],
         )
     @classmethod
-    def execute(cls, state,CLIP_VISION, image,emb,positive=None) -> io.NodeOutput:
+    def execute(cls, CLIP_VISION, conditioning,emb,connector,model_type,positive=None) -> io.NodeOutput:
+        model_dtype = torch.bfloat16 if model_type == 'bf16' else torch.float32
+        clear_comfyui_cache()
         emb_path=folder_paths.get_full_path("LucidFlux", emb) if emb != "none" else None
-        _,height,width,_=image.shape
-        tensor_list=tensor2list(image)
-        tensor_list=[i.to(device) for i in tensor_list]
-        inp_cond=get_cond(positive,emb_path,height,width,device)      
-        postive=preprocess_data(state,CLIP_VISION,tensor_list, inp_cond,device)
-        cf_models=mm.loaded_models()
-        try:
-            for pipe in cf_models:   
-                pipe.unpatch_model(device_to=torch.device("cpu"))
-                print(f"Unpatching models.{pipe}")
-        except: pass
-        mm.soft_empty_cache()
-        torch.cuda.empty_cache()
-        max_gpu_memory = torch.cuda.max_memory_allocated()
-        print(f"After Max GPU memory allocated: {max_gpu_memory / 1000 ** 3:.2f} GB")
-        return io.NodeOutput(postive)
+        connector_path=folder_paths.get_full_path("LucidFlux", connector) if connector != "none" else None
+        height,width=conditioning["height"],conditioning["width"]
+        inp_cond=get_cond(positive,emb_path,height,width,device,conditioning["infer_2k"])      
+        data_list=preprocess_data(connector_path,CLIP_VISION,conditioning, inp_cond,model_dtype,device)
+        clear_comfyui_cache()
+        conditioning["data_list"]=data_list
+        conditioning["model_dtype"]=model_type
+        return io.NodeOutput(conditioning)
 
 
 class LucidFlux_SM_KSampler(io.ComfyNode):
@@ -224,64 +170,111 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
             display_name="LucidFlux_SM_KSampler",
             category="LucidFlux_SM",
             inputs=[
-                io.Custom("LucidFlux_SM").Input("model"),
-                io.Vae.Input("vae"),
+                io.Model.Input("model"),
                 io.Int.Input("steps", default=20, min=1, max=10000),
                 io.Int.Input("seed", default=0, min=0, max=MAX_SEED),
                 io.Float.Input("cfg", default=4.0, min=0.0, max=100.0, step=0.1, round=0.01,),
-                io.Boolean.Input("wavelet", default=True),
                 io.Conditioning.Input("condition"),
         
             ],
             outputs=[
-                io.Image.Output(display_name="Image"),
+                io.Latent.Output(display_name="Latent"),
             ],
         )
     @classmethod
-    def execute(cls, model,vae, steps,seed, cfg,wavelet, condition, ) -> io.NodeOutput:
-
-        use_accelerate=condition.get("use_accelerate",True)
-        use_mmgp=condition.get("use_mmgp",True)
-        if not use_accelerate and not use_mmgp:
+    def execute(cls, model, steps,seed, cfg, condition, ) -> io.NodeOutput:
+        dual_condition_model=model["dual_condition_branch"]
+        
+        model=model["model"]
+        if not  model.block_offload:
             model.to(device)
-            
-        dual_condition_branch=condition.get("dual_condition_branch")
-        x=lucidflux_inference(model,dual_condition_branch,condition["data_list"],cfg,steps,seed,device,condition.get("is_schnell",False)) #torch.Size([1, 16, 128, 128])
-   
-        torch.cuda.empty_cache()
-        images=[]
-        for i ,j in zip(x,condition["data_list"]):
-            if not wavelet:
-                hq=vae.decode(i)
-            else:
-                x1=vae.decode(i) #torch.Size([1,1024, 1024, 3])
-                x1 = x1.clamp(-1, 1).permute(0, 3, 1, 2).to(device) #--> torch.Size([1, 3, 1024, 1024])
-                x1=rearrange(x1[-1], "c h w -> h w c")
-                hq = wavelet_reconstruction((x1.permute(2, 0, 1) + 1.0) / 2, j.get("ci_pre_origin").squeeze(0).to(device))
-                hq = hq.clamp(0, 1)
-                hq=hq.unsqueeze(0).permute(0, 2, 3, 1)
-            images.append(hq)
-        img = torch.cat(images, dim=0)
+        x=lucidflux_inference(model,dual_condition_model,condition,cfg,steps,seed,device,model.is_schnell) #torch.Size([1, 16, 128, 128])
+        output={"samples":x,"images":condition["images"],"infer_2k":condition["infer_2k"]}
+        return io.NodeOutput(output)
+
+class LucidFlux_SM_Decoder(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LucidFlux_SM_Decoder",
+            display_name="LucidFlux_SM_Decoder",
+            category="LucidFlux_SM",
+            inputs=[ 
+                io.Combo.Input("vae",options= ["none"] + folder_paths.get_filename_list("vae")),
+                io.Latent.Input("latent"),
+                io.Boolean.Input("wavelet", default=True),
+                io.Vae.Input("ae",optional=True),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+    @classmethod
+    def execute(cls,vae, latent,wavelet,ae=None,) -> io.NodeOutput:
+
+        x_list=latent["samples"]
+        img_list=latent["images"]
+        output=[]
        
-        return io.NodeOutput(img)
-
-
-from aiohttp import web
-from server import PromptServer
-@PromptServer.instance.routes.get("/Edit_SM_Extension")
-async def get_hello(request):
-    return web.json_response("Edit_SM_Extension")
+        use_cf=True  if ae is not None else False
+        
+        vae_path=folder_paths.get_full_path("vae", vae) if vae != "none" else None
+        if vae_path is not None and  not use_cf:
+            ae,use_ultraflux = load_ae("flux-dev", vae_path,device,node_cr_path)
+            ae.decoder.to(device)
+        for x ,image in zip(x_list,img_list):
+            if use_cf:
+                x=(x/0.3611)+0.1159  # add mean
+                x=ae.decode(x) #torch.Size([1, 1024, 1024, 3])
+                if wavelet:
+                    x1 = x.permute(0, 3, 1, 2) #--> torch.Size([1, 3, 1024, 1024])
+                    x1 = rearrange(x1[-1], "c h w -> h w c").to("cpu")
+                    x1 = wavelet_reconstruction(x1.permute(2, 0, 1), image.permute(0, 3, 1, 2).squeeze(0).to("cpu"))
+                    x1 = x1.clamp(0, 1)
+                    img=x1.unsqueeze(0).permute(0, 2, 3, 1) 
+                else:
+                    img = x
+            elif vae_path is not None and not use_cf:
+                if use_ultraflux:
+                    dec_dtype = ae.decoder.conv_in.weight.dtype
+                    x = (x / ae.scaling_factor + ae.shift_factor).to(dec_dtype)
+                    print(image.shape,123)
+                    if latent["infer_2k"]:
+                        image=image.permute(0, 3, 1, 2)
+                        image = F.interpolate(image, scale_factor=2, mode='bilinear', align_corners=False)
+                        image=image.permute(0, 2,3,1)
+                        print(x.shape,image.shape)
+                out = ae.decode(x) #torch.Size([1, 3, 1024, 1024])
+                x = out.sample if hasattr(out, "sample") else out
+                if wavelet:
+                    x1 = x.clamp(-1, 1)
+                    x1 = rearrange(x1[-1], "c h w -> h w c").to("cpu")
+                    hq = wavelet_reconstruction((x1.permute(2, 0, 1) + 1.0) / 2, image.permute(0, 3, 1, 2).squeeze(0).to("cpu"))
+                    hq = hq.clamp(0, 1)
+                    #save_image(hq, os.path.join(folder_paths.get_output_directory(), f"{123}.png"))
+                    img=hq.unsqueeze(0).permute(0, 2, 3, 1)
+                else:
+                    img =((x +1.0)/2).clamp(0, 1).permute(0, 2, 3, 1)
+            else: 
+                raise NotImplementedError("vae")
+            output.append(img)
+        if vae_path is not None and not use_cf:
+            ae.decoder.to("cpu")
+        elif use_cf:
+            clear_comfyui_cache()
+        images=torch.cat(output,dim=0).float().cpu()
+        return io.NodeOutput(images)
 
 class LucidFlux_SM_Extension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             LucidFlux_SM_Model,
-            LucidFlux_SM_Diff_Model,
             LucidFlux_SM_Diffbir,
             LucidFlux_SM_Cond,
             LucidFlux_SM_Encode,
             LucidFlux_SM_KSampler,
+            LucidFlux_SM_Decoder,
         ]
 
 
