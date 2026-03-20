@@ -10,9 +10,9 @@ from diffusers.pipelines.flux.modeling_flux import ReduxImageEncoder
 from .src.flux.sampling import denoise_lucidflux, get_noise, get_schedule, unpack
 from .src.flux.util import load_flow_model, load_single_condition_branch, load_safetensors
 from .src.flux.swinir import SwinIR
-from .model_loader_utils import phi2narry
+from .src.flux.lucidflux  import prepare_with_embeddings
 node_cr_path = os.path.dirname(os.path.abspath(__file__))
-import folder_paths
+from torch import Tensor
 
 def get_timestep_embedding(
     timesteps: torch.Tensor,
@@ -259,83 +259,63 @@ def load_redux_image_encoder(device: torch.device, dtype: torch.dtype, redux_sta
     redux_image_encoder.to(device).to(dtype=dtype)
     return redux_image_encoder
 
-def load_diffbir_model(diffbir_v2,swinir_path,cur_path,out_path,torch_device="cpu"):
-    if "none"==diffbir_v2:
-        swinir = SwinIR(
-            img_size=64,
-            patch_size=1,
-            in_chans=3,
-            embed_dim=180,
-            depths=[6, 6, 6, 6, 6, 6, 6, 6],
-            num_heads=[6, 6, 6, 6, 6, 6, 6, 6],
-            window_size=8,
-            mlp_ratio=2,
-            sf=8,
-            img_range=1.0,
-            upsampler="nearest+conv",
-            resi_connection="1conv",
-            unshuffle=True,
-            unshuffle_scale=8,
-        )
-        ckpt_obj = torch.load(swinir_path, weights_only=False,map_location="cpu")
-        state = ckpt_obj.get("state_dict", ckpt_obj)
-        new_state = {k.replace("module.", ""): v for k, v in state.items()}
-        swinir.load_state_dict(new_state, strict=False)
-        swinir.eval()
-        del state
-        for p in swinir.parameters():
-            p.requires_grad_(False)
-        swinir = swinir.to(torch.device("cpu"))
-    else:
-        from .src.DiffBIR.inference import load_diffbir_model
-        swinir=load_diffbir_model(diffbir_v2,swinir_path,torch_device,cur_path,out_path)
+def load_diffbir_model(swinir_path):
+    
+    swinir = SwinIR(
+        img_size=64,
+        patch_size=1,
+        in_chans=3,
+        embed_dim=180,
+        depths=[6, 6, 6, 6, 6, 6, 6, 6],
+        num_heads=[6, 6, 6, 6, 6, 6, 6, 6],
+        window_size=8,
+        mlp_ratio=2,
+        sf=8,
+        img_range=1.0,
+        upsampler="nearest+conv",
+        resi_connection="1conv",
+        unshuffle=True,
+        unshuffle_scale=8,
+    )
+    ckpt_obj = torch.load(swinir_path, weights_only=False,map_location="cpu")
+    state = ckpt_obj.get("state_dict", ckpt_obj)
+    new_state = {k.replace("module.", ""): v for k, v in state.items()}
+    swinir.load_state_dict(new_state, strict=False)
+    swinir.eval()
+    del state
+    for p in swinir.parameters():
+        p.requires_grad_(False)
+    swinir = swinir.to(torch.device("cpu"))
     return swinir
 
-def infer_diffbir_model(model,input_pli_list,torch_device,):
-    swinir=model.get("model")
-    is_v2=model.get("is_v2")
-    
-    if not is_v2:
-        swinir.to(torch_device)
-    else:
-        swinir.to(torch_device,dtype=torch.bfloat16)
+def infer_diffbir_model(model,input_pli_list,torch_device):
+    model.to(torch_device)
     images=[]
+    condition_cond_list=[]
+    condition_cond_ldr_list=[]
     for lq_processed in input_pli_list:
-        if not is_v2:
-            condition_cond = torch.from_numpy((np.array(lq_processed) / 127.5) - 1)
-            condition_cond = condition_cond.permute(2, 0, 1).unsqueeze(0).to(torch.bfloat16).to(torch_device)
-        else:
-            condition_cond=None
+        condition_cond = torch.from_numpy((np.array(lq_processed) / 127.5) - 1)
+        condition_cond = condition_cond.permute(2, 0, 1).unsqueeze(0).to(torch.bfloat16).to(torch_device)
+        condition_cond_list.append(condition_cond)
         with torch.no_grad():
-            # SwinIR prior
-            if  not is_v2:
-                ci_01 = torch.clamp((condition_cond.float() + 1.0) / 2.0, 0.0, 1.0)
-                ci_pre = swinir(ci_01).float().clamp(0.0, 1.0).to(torch_device) #(1,3,H,W) or 3 h w
-                #print(ci_pre.shape) #torch.Size([1, 3, 1024, 1024])
-                if ci_pre.ndim == 3:
-                    ci_pre = ci_pre.unsqueeze(0)
-                ci_pre=ci_pre.permute(0, 2, 3, 1)# to comfy
-            else:             
-                ci_pre_list=swinir.run(lq_processed)
-                ci_pre=[phi2narry(i).to(torch_device) for i in ci_pre_list][0]
-                #print( 123,ci_pre.shape) #torch.Size([ 1, 1024, 1024, 3])
+            ci_01 = torch.clamp((condition_cond.float() + 1.0) / 2.0, 0.0, 1.0)
+            ci_pre = model(ci_01).float().clamp(0.0, 1.0).to(torch_device) #(1,3,H,W) or 3 h w
+            condition_cond_ldr = ci_pre * 2.0 - 1.0
+            condition_cond_ldr_list.append(condition_cond_ldr)
+            if ci_pre.ndim == 3:
+                ci_pre = ci_pre.unsqueeze(0)
+            ci_pre=ci_pre.permute(0, 2, 3, 1)# to comfy
             images.append(ci_pre)
-    if not is_v2:
-        swinir.to(torch.device("cpu"))
-    else:
-        swinir.to("cpu")
+    model.to(torch.device("cpu"))
     torch.cuda.empty_cache()
-    image_tensor=torch.cat(images,dim=0)
-    return image_tensor
+    return images,condition_cond_list,condition_cond_ldr_list
 
-def load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,block_offload,torch_device):
+def load_lucidflux_model(args,ckpt_path,cf_model,block_offload,torch_device,model_dtype):
     name =args.name #"flux-dev"
-    #offload = args.offload
-    is_schnell = name == "flux-schnell"
-    
-    model=load_flow_model(name,ckpt_path,cf_model,use_accelerate,use_quantize,block_offload)
 
-    condition_lq=load_single_condition_branch(name, torch_device).to(torch.bfloat16)
+    model=load_flow_model(name,ckpt_path,cf_model,model_dtype,block_offload)
+
+    condition_lq=load_single_condition_branch(name, torch_device).to(model_dtype)
 
 
     # load model checkpoint
@@ -347,15 +327,15 @@ def load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,blo
     condition_lq.load_state_dict(checkpoint["condition_lq"], strict=False)
     condition_lq = condition_lq.to(torch_device)
 
-    condition_ldr = load_single_condition_branch(name, torch_device).to(torch.bfloat16)
+    condition_ldr = load_single_condition_branch(name, torch_device).to(model_dtype)
     condition_ldr.load_state_dict(checkpoint["condition_ldr"], strict=False)
 
-    modulation_lq = Modulation(dim=3072).to(torch.bfloat16)
+    modulation_lq = Modulation(dim=3072).to(model_dtype)
     modulation_lq.load_state_dict(checkpoint["modulation_lq"], strict=False)
 
-    modulation_ldr = Modulation(dim=3072).to(torch.bfloat16)
+    modulation_ldr = Modulation(dim=3072).to(model_dtype)
     modulation_ldr.load_state_dict(checkpoint["modulation_ldr"], strict=False)
-
+    del checkpoint
 
     dual_condition_branch = DualConditionBranch(
             condition_lq,
@@ -365,10 +345,7 @@ def load_lucidflux_model(args,ckpt_path,cf_model,use_accelerate,use_quantize,blo
         ).to(torch_device)
     
     
-    state_dict=checkpoint["connector"]
-    del checkpoint
-    cond={"state_dict":state_dict,"dual_condition_branch":dual_condition_branch,"is_schnell":is_schnell,"use_accelerate":use_accelerate,"use_quantize":use_quantize}
-    return model,cond
+    return model,dual_condition_branch
 
 def tensor2image(tensor):
     tensor = tensor.cpu()
@@ -376,28 +353,16 @@ def tensor2image(tensor):
     image = Image.fromarray(image_np, mode='RGB')
     return image
 
-def preprocess_data(state_dict,siglip_model,tensor_list, inp_cond,torch_device):
+def preprocess_data(connector_path,siglip_model,conditioning, inp_cond,dtype,torch_device):
 
-    dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float32
+    state_dict=torch.load(connector_path, map_location="cpu",weights_only=False)
+    redux_image_encoder = load_redux_image_encoder(torch_device, dtype, state_dict) 
+    with torch.no_grad():
+        data_list=[]
+        for ci_pre in conditioning["images"]: #( 1HW3 )
+            ci_pre=ci_pre.to(torch_device,dtype=dtype)
 
-    redux_image_encoder = load_redux_image_encoder(torch_device, dtype, state_dict["state_dict"])
-   
-    data_list=[]
-    for ci_pre in tensor_list: #( 1HW3 )
-        #filename = os.path.basename(img_path).split(".")[0]
-        lq_processed=tensor2image(ci_pre)
-        condition_cond = torch.from_numpy((np.array(lq_processed) / 127.5) - 1)
-        condition_cond = condition_cond.permute(2, 0, 1).unsqueeze(0).to(torch.bfloat16).to(torch_device)
-        condition_cond_ldr = None
-
-        with torch.no_grad():
-
-            ci_pre_origin=ci_pre.permute(0, 3, 1, 2) ## 1HW3 TO (1,3,H,W)
-
-            condition_cond_ldr = (ci_pre_origin * 2.0 - 1.0).to(torch.bfloat16)
-
-            _,height,width,_=ci_pre.shape
-            siglip_image_pre_fts=siglip_model.encode_image(ci_pre)["last_hidden_state"].to(device=torch_device,dtype=torch.bfloat16)
+            siglip_image_pre_fts=siglip_model.encode_image(ci_pre)["last_hidden_state"].to(device=torch_device,dtype=dtype)
             #print(siglip_image_pre_fts.shape) #torch.Size([1, 1024, 1152])
           
             enc_dtype = redux_image_encoder.redux_up.weight.dtype
@@ -406,19 +371,17 @@ def preprocess_data(state_dict,siglip_model,tensor_list, inp_cond,torch_device):
             )["image_embeds"]
             #print(image_embeds.shape) #torch.Size([1, 1024, 4096])
             # concat to txt and extend txt_ids
-            txt = inp_cond["txt"].to(device=torch_device, dtype=torch.bfloat16)
-            txt_ids = inp_cond["txt_ids"].to(device=torch_device, dtype=torch.bfloat16)
-            siglip_txt = torch.cat([txt, image_embeds.to(dtype=torch.bfloat16)], dim=1).to(device=torch_device, dtype=torch.bfloat16)
+            txt = inp_cond["txt"].to(device=torch_device, dtype=dtype)
+            txt_ids = inp_cond["txt_ids"].to(device=torch_device, dtype=dtype)
+            siglip_txt = torch.cat([txt, image_embeds.to(dtype=dtype)], dim=1).to(device=torch_device, dtype=dtype)
             B, L, C = txt_ids.shape
-            extra_ids = torch.zeros((B, 1024, C), device=txt_ids.device, dtype=torch.bfloat16)
-            siglip_txt_ids = torch.cat([txt_ids, extra_ids], dim=1).to(device=torch_device,dtype=torch.bfloat16)
+            extra_ids = torch.zeros((B, 1024, C), device=txt_ids.device, dtype=dtype)
+            siglip_txt_ids = torch.cat([txt_ids, extra_ids], dim=1).to(device=torch_device,dtype=dtype)
 
-          
-            data={"siglip_txt": siglip_txt, "siglip_txt_ids": siglip_txt_ids,"inp_cond":inp_cond,"txt":txt,"txt_ids":txt_ids,"size":(height, width),
-                  "condition_cond":condition_cond, "condition_cond_ldr": condition_cond_ldr,"ci_pre_origin":ci_pre_origin}
-        data_list.append(data)
-    state_dict["data_list"]=data_list
-    return state_dict
+            data={"siglip_txt": siglip_txt, "siglip_txt_ids": siglip_txt_ids,"inp_cond":inp_cond,"txt":txt,"txt_ids":txt_ids}
+            data_list.append(data)
+        redux_image_encoder.to(torch.device("cpu"))
+    return data_list
 
 def prepare_with_embeddings(img, precomputed_txt, precomputed_vec):
     """
@@ -446,9 +409,13 @@ def prepare_with_embeddings(img, precomputed_txt, precomputed_vec):
         "vec": vec,
     }
        
-def get_cond(positive,emb_path,height,width,device,bs=1):
-    h=2 * math.ceil(height / 16)
-    w=2 * math.ceil(width / 16)
+def get_cond(positive,emb_path,height,width,device,infer_2k,bs=1):
+    if infer_2k:
+        h=2 * math.ceil(height / 32)
+        w=2 * math.ceil(width / 32)
+    else:
+        h=2 * math.ceil(height / 16)
+        w=2 * math.ceil(width / 16)
 
     img_ids = torch.zeros(h // 2, w // 2, 3)
     img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
@@ -463,7 +430,6 @@ def get_cond(positive,emb_path,height,width,device,bs=1):
         if vec.shape[0] == 1 and bs > 1:
             vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 
-        return inp_cond
     elif emb_path is not None:
         # 使用预计算的embeddings
         #embeddings_path = "weights/lucidflux/prompt_embeddings.pt"
@@ -479,7 +445,7 @@ def get_cond(positive,emb_path,height,width,device,bs=1):
         txt_ids = torch.zeros(bs, txt.shape[1], 3)
     else:
         raise ValueError("Invalid embedding path or conditions")
-    
+
     inp_cond={
             "img_ids": img_ids.to(device),
             "txt": txt.to(device),
@@ -488,29 +454,16 @@ def get_cond(positive,emb_path,height,width,device,bs=1):
                 }
     return inp_cond
 
-def load_condition_model(model,lora_paths,lora_scales):
-    if lora_paths is None:
-            return model
-    try:
-        if len(lora_paths)!=len(lora_scales): #sacles  
-            lora_scales = lora_paths[:1]
-        if model.use_mmgp:
-            from mmgp.offload import load_loras_into_model
-            try:
-                load_loras_into_model(model, lora_paths, lora_scales, activate_all_loras = True)
-            except:
-                print("Failed to load LoRAs into MMGP model")
-        else:
-            for i, (lora_path, lora_scale) in enumerate(zip(lora_paths, lora_scales)):
-                if lora_path is not None:
-                    try:
-                        _apply_lora_weights(model, lora_path, lora_scale)
-                    except Exception as e:
-                        print(f"Failed to apply LoRA {i+1} ({lora_path}): {str(e)}")
+def load_condition_model(model,lora_path,lora_scale):
+    if lora_path is None:
         return model
-        
-    except Exception as e:
-        print(f"Failed to apply LoRA {str(e)}")
+    else:
+        pipe=model["model"]
+        try:
+            _apply_lora_weights(pipe, lora_path, lora_scale)
+        except Exception as e:
+            print(f"Failed to apply LoRA {str(e)}")
+        model["model"] = pipe
         return model
 
 def _apply_lora_weights(model, lora_path, scale):
@@ -546,34 +499,79 @@ def _get_original_key(lora_key):
     original_key = original_key.replace(".lora_down.weight", ".weight")
     return original_key
 
+def get_noise_(
+    num_samples: int,
+    height: int,
+    width: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    seed: int,
+):
+    return torch.randn(
+        num_samples,
+        16,
+        # allow for packing
+        2 * math.ceil(height / 32),
+        2 * math.ceil(width / 32),
+        device=device,
+        dtype=dtype,
+        generator=torch.Generator(device=device).manual_seed(seed),
+    )
 
-def lucidflux_inference(model,dual_condition_branch,input_data,guidance,num_steps,seed,torch_device,is_schnell=False):
+
+def unpack_(x: Tensor, height: int, width: int) -> Tensor:
+    return rearrange(
+        x,
+        "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+        h=math.ceil(height / 32),
+        w=math.ceil(width / 32),
+        ph=2,
+        pw=2,
+    )
+
+def lucidflux_inference(model,dual_condition_branch,condition,guidance,num_steps,seed,torch_device,is_schnell=False):
     lat_list = []
-    for data in input_data: #input_data [dict,dict...]
-      
-        
+
+    model_dtype = torch.bfloat16 if condition["model_dtype"] == 'bf16' else torch.float32
+
+    infer_2k=condition["infer_2k"]
+    height, width = condition["height"], condition["width"]
+    input_data=condition["data_list"]
+    condition_cond_list=condition["condition_cond_list"]
+    condition_cond_ldr_list=condition["condition_cond_ldr_list"]
+    for data,condition_cond_lq,condition_cond_ldr in zip(input_data,condition_cond_list,condition_cond_ldr_list): #input_data [dict,dict...]
         with torch.no_grad():
-          
-            height, width=data.get("size")
-            #print(f"height:{height}, width:{width}")
             torch.manual_seed(seed)
-            x = get_noise(
+            if infer_2k:
+                x = get_noise_(
                 1, height, width, device=torch_device,
-                dtype=torch.bfloat16, seed=seed
-            )
+                dtype=model_dtype, seed=seed
+                )
+            else:
+                x = get_noise(
+                    1, height, width, device=torch_device,
+                    dtype=model_dtype, seed=seed
+                )
             bs, c, h, w = x.shape
             img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
 
             if img.shape[0] == 1 and bs > 1:
                 img = repeat(img, "1 ... -> bs ...", bs=bs)
-
-            timesteps = get_schedule(
-                            num_steps,
-                            (width // 8) * (height // 8) // (16 * 16),
-                            shift=(not is_schnell),
-                        )
+            if infer_2k:
+                timesteps = get_schedule(
+                        num_steps,
+                        (width // 8) * (height // 8) // (32 * 32),
+                        shift=(not is_schnell),
+                    )
+            else:
+                timesteps = get_schedule(
+                                num_steps,
+                                (width // 8) * (height // 8) // (16 * 16),
+                                shift=(not is_schnell),
+                            )
           
             print("start denoise...")
+            #print(img.shape,condition_cond_lq.shape,condition_cond_ldr.shape) #torch.Size([1, 4096, 64]) torch.Size([1, 3, 1024, 1024]) torch.Size([1, 3, 1024, 1024])
             x = denoise_lucidflux(
                 model,
                 dual_condition_model=dual_condition_branch,
@@ -586,19 +584,16 @@ def lucidflux_inference(model,dual_condition_branch,input_data,guidance,num_step
                 vec=data.get("inp_cond")["vec"],
                 timesteps=timesteps,
                 guidance=guidance,
-                condition_cond_lq=data.get("condition_cond"),
-                condition_cond_ldr=data.get("condition_cond_ldr"),
+                condition_cond_lq=condition_cond_lq,
+                condition_cond_ldr=condition_cond_ldr.to(model_dtype),
             )
-
-
-            x = unpack(x.float(), height, width)
-
-            x=(x/0.3611)+0.1159 #mean
-
-
+            if infer_2k:
+                x = unpack_(x.float(), height, width)
+            else:
+                x = unpack(x.float(), height, width)
         lat_list.append(x)
 
-        print("start decoder...")
+       
     
     return lat_list
 

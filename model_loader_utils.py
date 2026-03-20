@@ -7,10 +7,23 @@ from PIL import Image
 import numpy as np
 import cv2
 from comfy.utils import common_upscale
-
+import comfy.model_management as mm
 
 
 cur_path = os.path.dirname(os.path.abspath(__file__))
+
+def clear_comfyui_cache():
+    cf_models=mm.loaded_models()
+    try:
+        for pipe in cf_models:
+            pipe.unpatch_model(device_to=torch.device("cpu"))
+            #print(f"Unpatching models.{pipe}")
+    except: pass
+    mm.soft_empty_cache()
+    torch.cuda.empty_cache()
+    max_gpu_memory = torch.cuda.max_memory_allocated()
+    print(f"After Max GPU memory allocated: {max_gpu_memory / 1000 ** 3:.2f} GB")
+
 
 def gc_cleanup():
     gc.collect()

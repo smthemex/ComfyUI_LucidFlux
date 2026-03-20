@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-
+import sys
 import torch
 import json
 import cv2
@@ -16,6 +16,29 @@ from .condition import SingleConditionBranch
 from .modules.autoencoder import AutoEncoder, AutoEncoderParams
 from .modules.conditioner import HFEmbedder
 from einops import rearrange
+from ..ultraflux.autoencoder_kl import AutoencoderKL
+from safetensors.torch import load_file
+from contextlib import contextmanager
+@contextmanager
+def temp_patch_module_attr(module_name: str, attr_name: str, new_obj):
+    mod = sys.modules.get(module_name)
+    if mod is None:
+        yield
+        return
+    had = hasattr(mod, attr_name)
+    orig = getattr(mod, attr_name, None)
+    setattr(mod, attr_name, new_obj)
+    try:
+        yield
+    finally:
+        if had:
+            setattr(mod, attr_name, orig)
+        else:
+            try:
+                delattr(mod, attr_name)
+            except Exception:
+                pass
+
 
 
 def load_safetensors(path):
@@ -236,7 +259,7 @@ def load_from_repo_id(repo_id, checkpoint_name):
     return sd
 
 
-def load_flow_model(name,ckpt_path,cf_model,use_accelerate: bool = True,use_quantize: bool = False,block_offload=True,device: str='cpu'):
+def load_flow_model(name,ckpt_path,cf_model,model_dtype,block_offload=True,use_accelerate: bool = True,use_quantize: bool = False,device: str='cpu'):
     # Loading Flux
     print("Init model")
     #ckpt_path = configs[name].ckpt_path
@@ -249,7 +272,7 @@ def load_flow_model(name,ckpt_path,cf_model,use_accelerate: bool = True,use_quan
             is_accelerate_available = False
         ctx = init_empty_weights if is_accelerate_available else nullcontext
         with ctx():
-            model = Flux(configs[name].params).to(torch.bfloat16)
+            model = Flux(configs[name].params).to(model_dtype)
         #model = Flux(configs[name].params).to(torch.bfloat16)
         if ckpt_path is not None:
             sd = load_sft(ckpt_path, device='cpu')
@@ -270,14 +293,14 @@ def load_flow_model(name,ckpt_path,cf_model,use_accelerate: bool = True,use_quan
                 is_accelerate_available = False
             ctx = init_empty_weights if is_accelerate_available else nullcontext
             with ctx():
-                model = Flux(configs[name].params).to(torch.bfloat16)
+                model = Flux(configs[name].params).to(model_dtype)
 
             if ckpt_path is not None:
                 model = load_checkpoint_and_dispatch(
                     model,
                     ckpt_path,
                     device_map="auto", 
-                    dtype=torch.bfloat16
+                    dtype=model_dtype,
                 )   
             else:
                 original_sd = cf_model.model.diffusion_model.state_dict()
@@ -285,7 +308,7 @@ def load_flow_model(name,ckpt_path,cf_model,use_accelerate: bool = True,use_quan
                     model,
                     original_sd,
                     device_map="auto",  
-                    dtype=torch.bfloat16
+                    dtype=model_dtype,
                 )   
 
                 del cf_model
@@ -390,26 +413,35 @@ def load_clip(device: str) -> HFEmbedder:
     return HFEmbedder(version=clip_version, max_length=77, torch_dtype=torch.bfloat16).to(device)
 
 
-def load_ae(name: str, device: str, hf_download: bool = True) -> AutoEncoder:
-    ckpt_path = configs[name].ae_path
-    if (
-        ckpt_path is None
-        and configs[name].repo_id is not None
-        and configs[name].repo_ae is not None
-        and hf_download
-    ):
-        ckpt_path = hf_hub_download(configs[name].repo_id_ae, configs[name].repo_ae)
-
+def load_ae(name: str, ckpt_path: str, device,node_cr_path) -> AutoEncoder:
+    #ckpt_path = configs[name].ae_path
+    # if (
+    #     ckpt_path is None
+    #     and configs[name].repo_id is not None
+    #     and configs[name].repo_ae is not None
+    #     and hf_download
+    # ):
+    #     ckpt_path = hf_hub_download(configs[name].repo_id_ae, configs[name].repo_ae)
+    sd = load_sft(ckpt_path, device="cpu")
+    use_ultraflux = False
+    for param_name, param in list(sd.items()): 
+        if param_name.startswith("encoder.conv_norm_out"):
+            use_ultraflux=True
+            break
+    print("Using UltraFlux:",use_ultraflux)
     # Loading the autoencoder
     print("Init AE")
-    with torch.device("meta" if ckpt_path is not None else device):
-        ae = AutoEncoder(configs[name].ae_params)
-
-    if ckpt_path is not None:
-        sd = load_sft(ckpt_path, device=str(device))
+    if use_ultraflux:
+        del sd
+        with temp_patch_module_attr("diffusers", "AutoencoderKL", AutoencoderKL):
+            ae=AutoencoderKL.from_single_file(ckpt_path,config=os.path.join(node_cr_path, "src/vae"),torch_dtype=torch.bfloat16)
+    else:
+        with torch.device("meta" if ckpt_path is not None else device):
+            ae = AutoEncoder(configs[name].ae_params)
         missing, unexpected = ae.load_state_dict(sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
-    return ae
+        del sd
+    return ae,use_ultraflux
 
 
 class WatermarkEmbedder:
