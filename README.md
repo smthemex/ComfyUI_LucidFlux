@@ -50,7 +50,7 @@ pip install -r requirements.txt
 
 # 4 Example
 * 4K
-![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example.png)
+![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/pid.png)
 * 2k
 ![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example2k.png)
 * 1k
