@@ -1,22 +1,19 @@
  # !/usr/bin/env python
 # -*- coding: UTF-8 -*-
-from einops import rearrange
 import numpy as np
 import torch
 import os
 from omegaconf import OmegaConf
-from .model_loader_utils import  tensor2pillist_upscale,clear_comfyui_cache
-from .src.flux.util import load_ae
-from .inference import load_lucidflux_model,lucidflux_inference,preprocess_data,get_cond,load_condition_model,load_diffbir_model,infer_diffbir_model
+from .model_loader_utils import  tensor2pillist_upscale,clear_comfyui_cache,tensor2list
+from .inference import (load_lucidflux_model,lucidflux_inference,preprocess_data,get_cond,load_condition_model,load_pid_model,infer_pid_decode,
+                        load_diffbir_model,infer_diffbir_model,normal_vae_decode)
 import folder_paths
-from typing_extensions import override
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest  import io
 import nodes
-import comfy.model_management as mm
-from .src.flux.align_color import wavelet_reconstruction
-import torch.nn.functional as F
+
+
 MAX_SEED = np.iinfo(np.int32).max
-from torchvision.utils import save_image
+
 device = torch.device(
     "cuda:0") if torch.cuda.is_available() else torch.device(
     "mps") if torch.backends.mps.is_available() else torch.device("cpu")
@@ -192,6 +189,72 @@ class LucidFlux_SM_KSampler(io.ComfyNode):
         output={"samples":x,"images":condition["images"],"infer_2k":condition["infer_2k"]}
         return io.NodeOutput(output)
 
+class LucidFlux_SM_Pid_Model(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        
+        return io.Schema(
+            node_id="LucidFlux_SM_Pid_Model",
+            display_name="LucidFlux_SM_Pid_Model",
+            category="LucidFlux_SM",
+            inputs=[
+                io.Combo.Input("pid_model",options= ["none"] + folder_paths.get_filename_list("diffusion_models")),
+                io.Combo.Input("model_type",options= ["bf16","f32"] ),
+                io.Combo.Input("pid_type",options= ["2k","2kto4k"] ),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+                ],
+            )
+    @classmethod
+    def execute(cls, pid_model,model_type,pid_type,) -> io.NodeOutput:
+        clear_comfyui_cache()
+        model_dtype = torch.bfloat16 if model_type == 'bf16' else torch.float32
+        pid_path=folder_paths.get_full_path("diffusion_models", pid_model) if pid_model != "none" else None
+
+        model=load_pid_model(pid_path,model_dtype,pid_type,weigths_LucidFlux_current_path)
+        model.model.to("cpu")
+       
+        return io.NodeOutput(model)
+    
+class LucidFlux_SM_Pid_Decoder(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LucidFlux_SM_Pid_Decoder",
+            display_name="LucidFlux_SM_Pid_Decoder",
+            category="LucidFlux_SM",
+            inputs=[ 
+                io.Model.Input("pid_model"),
+                io.Latent.Input("latent"),
+                io.Int.Input("steps", default=4, min=1, max=10000),
+                io.Int.Input("seed", default=0, min=0, max=MAX_SEED),
+                io.Float.Input("cfg", default=1.0, min=0.0, max=100.0, step=0.1, round=0.01,),
+                io.Float.Input("degrade_sigma", default=0.0, min=0.0, max=1.0, step=0.1, round=0.01,),
+                io.Float.Input("pid_color_align_strength", default=0.6, min=0.1, max=1.0, step=0.1, round=0.01,),
+                io.Int.Input("streaming_prefetch_count", default=1, min=0, max=MAX_SEED),
+                io.Boolean.Input("wavelet", default=True),
+                io.Image.Input("images",optional=True),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+    @classmethod
+    def execute(cls,pid_model, latent,steps,seed,cfg,degrade_sigma,pid_color_align_strength,streaming_prefetch_count,wavelet,images=None) -> io.NodeOutput:
+        if streaming_prefetch_count==0:
+            pid_model.model.to(device)
+            streaming_prefetch_count=None
+        if images is not None:
+            images=tensor2list(images)
+        clear_comfyui_cache()
+        image=infer_pid_decode(pid_model,latent,cfg,steps,seed,degrade_sigma,wavelet,pid_color_align_strength,streaming_prefetch_count,images)
+        del pid_model
+        torch.cuda.empty_cache()
+        return io.NodeOutput(image)
+
+
+
 class LucidFlux_SM_Decoder(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -206,77 +269,12 @@ class LucidFlux_SM_Decoder(io.ComfyNode):
                 io.Vae.Input("ae",optional=True),
             ],
             outputs=[
-                io.Image.Output(display_name="image"),
+                io.Image.Output(display_name="images"),
             ],
         )
     @classmethod
     def execute(cls,vae, latent,wavelet,ae=None,) -> io.NodeOutput:
-
-        x_list=latent["samples"]
-        img_list=latent["images"]
-        output=[]
-       
-        use_cf=True  if ae is not None else False
         
-        vae_path=folder_paths.get_full_path("vae", vae) if vae != "none" else None
-        if vae_path is not None and  not use_cf:
-            ae,use_ultraflux = load_ae("flux-dev", vae_path,device,node_cr_path)
-            ae.decoder.to(device)
-        for x ,image in zip(x_list,img_list):
-            if use_cf:
-                x=(x/0.3611)+0.1159  # add mean
-                x=ae.decode(x) #torch.Size([1, 1024, 1024, 3])
-                if wavelet:
-                    x1 = x.permute(0, 3, 1, 2) #--> torch.Size([1, 3, 1024, 1024])
-                    x1 = rearrange(x1[-1], "c h w -> h w c").to("cpu")
-                    x1 = wavelet_reconstruction(x1.permute(2, 0, 1), image.permute(0, 3, 1, 2).squeeze(0).to("cpu"))
-                    x1 = x1.clamp(0, 1)
-                    img=x1.unsqueeze(0).permute(0, 2, 3, 1) 
-                else:
-                    img = x
-            elif vae_path is not None and not use_cf:
-                if use_ultraflux:
-                    dec_dtype = ae.decoder.conv_in.weight.dtype
-                    x = (x / ae.scaling_factor + ae.shift_factor).to(dec_dtype)
-                    print(image.shape,123)
-                    if latent["infer_2k"]:
-                        image=image.permute(0, 3, 1, 2)
-                        image = F.interpolate(image, scale_factor=2, mode='bilinear', align_corners=False)
-                        image=image.permute(0, 2,3,1)
-                        print(x.shape,image.shape)
-                out = ae.decode(x) #torch.Size([1, 3, 1024, 1024])
-                x = out.sample if hasattr(out, "sample") else out
-                if wavelet:
-                    x1 = x.clamp(-1, 1)
-                    x1 = rearrange(x1[-1], "c h w -> h w c").to("cpu")
-                    hq = wavelet_reconstruction((x1.permute(2, 0, 1) + 1.0) / 2, image.permute(0, 3, 1, 2).squeeze(0).to("cpu"))
-                    hq = hq.clamp(0, 1)
-                    #save_image(hq, os.path.join(folder_paths.get_output_directory(), f"{123}.png"))
-                    img=hq.unsqueeze(0).permute(0, 2, 3, 1)
-                else:
-                    img =((x +1.0)/2).clamp(0, 1).permute(0, 2, 3, 1)
-            else: 
-                raise NotImplementedError("vae")
-            output.append(img)
-        if vae_path is not None and not use_cf:
-            ae.decoder.to("cpu")
-        elif use_cf:
-            clear_comfyui_cache()
-        images=torch.cat(output,dim=0).float().cpu()
+        images=normal_vae_decode(vae, latent,wavelet,ae,device)
         return io.NodeOutput(images)
 
-class LucidFlux_SM_Extension(ComfyExtension):
-    @override
-    async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [
-            LucidFlux_SM_Model,
-            LucidFlux_SM_Diffbir,
-            LucidFlux_SM_Cond,
-            LucidFlux_SM_Encode,
-            LucidFlux_SM_KSampler,
-            LucidFlux_SM_Decoder,
-        ]
-
-
-async def comfy_entrypoint() -> LucidFlux_SM_Extension:  # ComfyUI calls this to load your extension and its nodes.
-    return LucidFlux_SM_Extension()

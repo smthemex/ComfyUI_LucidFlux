@@ -6,13 +6,141 @@ from einops import rearrange, repeat
 from typing import Optional
 import math
 import torch.nn as nn
+import torch.nn.functional as F
+
 from diffusers.pipelines.flux.modeling_flux import ReduxImageEncoder
 from .src.flux.sampling import denoise_lucidflux, get_noise, get_schedule, unpack
 from .src.flux.util import load_flow_model, load_single_condition_branch, load_safetensors
 from .src.flux.swinir import SwinIR
-from .src.flux.lucidflux  import prepare_with_embeddings
+from .src.flux.util import load_ae
+from .model_loader_utils import clear_comfyui_cache
+from .src.flux.align_color import wavelet_reconstruction
+import folder_paths
+
 node_cr_path = os.path.dirname(os.path.abspath(__file__))
 from torch import Tensor
+from  .src.pid.decoder import (
+    PiDFluxDecoder,
+    align_color,
+)
+
+
+def normal_vae_decode(vae, latent,wavelet,ae,device):
+    x_list=latent["samples"]
+    img_list=latent["images"]
+    output=[]
+    
+    use_cf=True  if ae is not None else False
+    
+    vae_path=folder_paths.get_full_path("vae", vae) if vae != "none" else None
+    if vae_path is not None and  not use_cf:
+        ae,use_ultraflux = load_ae("flux-dev", vae_path,device,node_cr_path)
+        ae.decoder.to(device)
+    for x ,image in zip(x_list,img_list):
+        if use_cf:
+            x=(x/0.3611)+0.1159  # add mean
+            x=ae.decode(x) #torch.Size([1, 1024, 1024, 3])
+            if wavelet:
+                x1 = x.permute(0, 3, 1, 2) #--> torch.Size([1, 3, 1024, 1024])
+                x1 = rearrange(x1[-1], "c h w -> h w c").to("cpu")
+                x1 = wavelet_reconstruction(x1.permute(2, 0, 1), image.permute(0, 3, 1, 2).squeeze(0).to("cpu"))
+                x1 = x1.clamp(0, 1)
+                img=x1.unsqueeze(0).permute(0, 2, 3, 1) 
+            else:
+                img = x
+        elif vae_path is not None and not use_cf:
+            if use_ultraflux:
+                dec_dtype = ae.decoder.conv_in.weight.dtype
+                x = (x / ae.scaling_factor + ae.shift_factor).to(dec_dtype)
+                #print(image.shape,123)
+                if latent["infer_2k"]:
+                    image=image.permute(0, 3, 1, 2)
+                    image = F.interpolate(image, scale_factor=2, mode='bilinear', align_corners=False)
+                    image=image.permute(0, 2,3,1)
+                    #print(x.shape,image.shape)
+            out = ae.decode(x) #torch.Size([1, 3, 1024, 1024])
+            x = out.sample if hasattr(out, "sample") else out
+            if wavelet:
+                x1 = x.clamp(-1, 1)
+                x1 = rearrange(x1[-1], "c h w -> h w c").to("cpu")
+                hq = wavelet_reconstruction((x1.permute(2, 0, 1) + 1.0) / 2, image.permute(0, 3, 1, 2).squeeze(0).to("cpu"))
+                hq = hq.clamp(0, 1)
+                #save_image(hq, os.path.join(folder_paths.get_output_directory(), f"{123}.png"))
+                img=hq.unsqueeze(0).permute(0, 2, 3, 1)
+            else:
+                img =((x +1.0)/2).clamp(0, 1).permute(0, 2, 3, 1)
+        else: 
+            raise NotImplementedError("vae")
+        output.append(img)
+    if vae_path is not None and not use_cf:
+            ae.decoder.to("cpu")
+    elif use_cf:
+        clear_comfyui_cache()
+    images=torch.cat(output,dim=0).float().cpu()
+    return images
+
+
+def load_pid_model(pid_path,model_dtype,pid_type,weigths_LucidFlux_current_path):
+    pid_decoder = PiDFluxDecoder(
+        ckpt_type=pid_type,
+        #config_file=os.path.join(node_cr_path,"src/pid/_src/configs/pid/config.py"),
+        experiment=None,
+        checkpoint_path=pid_path,
+        scale=4 if pid_type == "2kto4k" else 2,
+        caption_embeddings_path=os.path.join(weigths_LucidFlux_current_path,"gemma_prompt_embedding.pt"),
+        dtype=model_dtype,
+    )
+    return pid_decoder
+
+def infer_pid_decode(pid_decoder,latent,cfg_scale,num_steps,seed,degrade_sigma,wavelet,pid_color_align_strength,streaming_prefetch_count,image_list=None):
+    x_list=latent.get("samples")
+    normal_lat=False
+    if not isinstance(x_list,list):
+        x_list=[x_list]
+        normal_lat=True
+    if normal_lat and image_list is None:
+        raise "when use comfyUI origin latent ,need link origin image to align color"
+    img_list=latent["images"] if not normal_lat else image_list
+    del latent
+    output=[]
+    
+    #caption = "high quality restored photo"
+    for lucidflux_latent, ci_pre in zip(x_list,img_list):
+        lucidflux_latent=lucidflux_latent.to("cuda")
+        ci_pre=ci_pre.to("cuda")
+        # print(lucidflux_latent.shape,ci_pre.shape)
+        # if pid_decoder.ckpt_type=="2k":
+        #     lucidflux_latent = F.interpolate(lucidflux_latent, scale_factor=0.5, mode='bilinear', align_corners=False)
+       
+        with torch.no_grad():
+            pid_img, target_hw = pid_decoder.decode(
+                lucidflux_latent,
+                caption=None,
+                cfg_scale=cfg_scale,
+                num_steps=num_steps,
+                seed=seed,
+                shift=None,
+                degrade_sigma=degrade_sigma,
+                streaming_prefetch_count=streaming_prefetch_count,
+            )
+        #print(pid_img.shape) #torch.Size([3, 1, 2048, 2048])
+        if wavelet:
+            img = align_color(
+                pid_img.detach().cpu().permute(1,0, 2, 3), #cbhw -->bchw
+                ci_pre.detach().cpu().permute(0, 3,1, 2 ), #bhwc -->bchw
+                strength=pid_color_align_strength,
+            )
+            img=((img+1.0)/2).clamp(0, 1).permute(0, 2, 3, 1)
+        else:
+            img =((pid_img.detach().cpu() +1.0)/2).clamp(0, 1).permute(1, 2, 3,0)
+        output.append(img)
+        #save_tensor_image(aligned, os.path.join(args.output_dir, f"{filename}.jpg"))
+        #print(f"[INFO] {filename} is done. Path: {args.output_dir}. PiD target_hw={target_hw}")
+    
+    return torch.cat(output,dim=0).float()
+
+
+
 
 def get_timestep_embedding(
     timesteps: torch.Tensor,
@@ -593,7 +721,6 @@ def lucidflux_inference(model,dual_condition_branch,condition,guidance,num_steps
                 x = unpack(x.float(), height, width)
         lat_list.append(x)
 
-       
     
     return lat_list
 
