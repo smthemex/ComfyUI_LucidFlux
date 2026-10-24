@@ -1,14 +1,13 @@
-# ComfyUI_LucidFlux
- [LucidFlux](https://github.com/W2GenAI-Lab/LucidFlux): Caption-Free Universal Image Restoration with a Large-Scale Diffusion Transformer，you can use it in ComfyUI
+# ComfyUI_LucidFlux（comfy 原生 DiT 链版本）
+
+[LucidFlux](https://github.com/W2GenAI-Lab/LucidFlux): Caption-Free Universal Image Restoration with a Large-Scale Diffusion Transformer，you can use it in ComfyUI
 
 # Update
-* supported [PID](https://github.com/nv-tlabs/PiD) 4K super-resolution
-* 新增Pid 4K超分,选择2kto4k 及对应模型，2k模式效果一般，用于512 to 2048
-
+*  更改封装方式，使用comfyUI的核心复现方法/ change the encapsulation method to use the core method of comfyUI
 
 1.Installation  
 -----
-  In the ./ComfyUI/custom_nodes directory, run the following:   
+In the ./ComfyUI/custom_nodes directory, run the following:   
 ```
 git clone https://github.com/smthemex/ComfyUI_LucidFlux
 ```
@@ -57,13 +56,13 @@ pip install -r requirements.txt
 ![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example1k.png)
 
 
-# 5 Citation
+# 4 Citation
 ------
 * [FLUX ](https://github.com/black-forest-labs/flux)
 * [X-flux](https://github.com/XLabs-AI/x-flux)
 * [PID](https://github.com/nv-tlabs/PiD)
 
- LucidFlux 
+LucidFlux 
 ```
 @article{fei2025lucidflux,
   title={LucidFlux: Caption-Free Universal Image Restoration via a Large-Scale Diffusion Transformer},
@@ -72,4 +71,3 @@ pip install -r requirements.txt
   year={2025}
 }
 ```
-
