@@ -1,69 +1,53 @@
-# ComfyUI_LucidFlux
- [LucidFlux](https://github.com/W2GenAI-Lab/LucidFlux): Caption-Free Universal Image Restoration with a Large-Scale Diffusion Transformer，you can use it in ComfyUI
+# ComfyUI_LucidFlux（comfy 原生 DiT 链版本）
+
+[LucidFlux](https://github.com/W2GenAI-Lab/LucidFlux): Caption-Free Universal Image Restoration with a Large-Scale Diffusion Transformer，you can use it in ComfyUI
 
 # Update
-* supported [PID](https://github.com/nv-tlabs/PiD) 4K super-resolution
-* 新增Pid 4K超分,选择2kto4k 及对应模型，2k模式效果一般，用于512 to 2048
-
+*  更改封装方式，使用comfyUI的核心复现方法/ change the encapsulation method to use the core method of comfyUI
 
 1.Installation  
 -----
-  In the ./ComfyUI/custom_nodes directory, run the following:   
+In the ./ComfyUI/custom_nodes directory, run the following:   
 ```
 git clone https://github.com/smthemex/ComfyUI_LucidFlux
 ```
-2.requirements  
-----
+2.checkpoints 
+2.1 any flux dit / 任意flux模型， KJ的 或者官方封装的  
+2.2 lucid checkpoints/ [links](https://huggingface.co/W2GenAI/LucidFlux/tree/main) /lucidflux.pth 和prompt_embeddings.pt 和gemma_prompt_embedding.pt  
+2.3 siglip512 [links](https://huggingface.co/google/siglip2-so400m-patch16-512/tree/main) / model.safetensors 只下单体模型   
+2.4 DiffBIR [links](https://huggingface.co/lxq007/DiffBIR/tree/main)  /  general_swinir_v1.ckpt   
+2.5 turbo lora [links](https://huggingface.co/alimama-creative/FLUX.1-Turbo-Alpha)  #optional 可选，8 步起  
+2.6 lucid_connector.pth[links](https://huggingface.co/smthem/LucidFLUX-connector)  
+2.7 ultravae[links](https://huggingface.co/Owen777/UltraFlux-v1/tree/main/vae) ,rename or not  
+2.8 PID[links](https://huggingface.co/nvidia/PiD)  /  PiD_res2kto4k_sr4x_official_flux_distill_4step.pth or PiD_res2k_sr4x_official_flux_distill_4step.pth  
+2.9 null_caption_embs.pt[links](https://huggingface.co/smthem/LucidFLUX-connector/tree/main)  #PID use  
 
 ```
-pip install -r requirements.txt
+ComfyUI/models/
+├── diffusion_models/flux1-dev-fp8.safetensors      # 任意 flux-dev（bf16/fp8 均可）
+├── PiD_v1pt5_res2kto4k_sr4x_official_flux_distill_4step.pth      # v1.5 的 4K 模型（使用PID必需）
+├── clip_vision/siglip2-so400m-patch16-512.safetensors
+├── vae/UltraFlux.safetensors                       # 2K 用；1K 可换 ae.safetensors
+└── LucidFlux/
+    ├── lucidflux.pth                               # 双条件分支（必需）
+    ├── lucid_connector.pth                         # SigLIP→4096 的 redux connector（必需）
+    ├── general_swinir_v1.ckpt                      # DiffBIR 先验（必需）
+    ├── prompt_embeddings.pt                        # 官方预计算文本 embedding（**必需**，替代 CLIP/T5）
+    └── gemma_prompt_embedding.pt / null_caption_embs.pt   # 仅 PiD 阶段用
 ```
 
-3.checkpoints 
-----
-* any flux dit / 任意flux模型， KJ的 或者官方封装的
-* lucid checkpoints/ [links](https://huggingface.co/W2GenAI/LucidFlux/tree/main) /lucidflux.pth 和prompt_embeddings.pt 和gemma_prompt_embedding.pt
-* siglip512 [links](https://huggingface.co/google/siglip2-so400m-patch16-512/tree/main) / model.safetensors 只下单体模型   
-* DiffBIR [links](https://huggingface.co/lxq007/DiffBIR/tree/main)  /  general_swinir_v1.ckpt   
-* turbo lora [links](https://huggingface.co/alimama-creative/FLUX.1-Turbo-Alpha)  #optional 可选，8 步起  
-* lucid_connector.pth[links](https://huggingface.co/smthem/LucidFLUX-connector)
-* flux ae  [links](https://huggingface.co/Comfy-Org/models)   #
-* ultravae[links](https://huggingface.co/Owen777/UltraFlux-v1/tree/main/vae) ,rename or not 
-
-* PID[links](https://huggingface.co/nvidia/PiD)  /  PiD_res2kto4k_sr4x_official_flux_distill_4step.pth or PiD_res2k_sr4x_official_flux_distill_4step.pth
-* null_caption_embs.pt[links](https://huggingface.co/smthem/LucidFLUX-connector/tree/main)  #PID use
-```
-├── ComfyUI/models/
-|     ├── diffusion_models/any flux dit # 任意flux dit模型 ，就用kj的或者x flux的，名字要带dev 否则跑schnell
-|     ├── diffusion_models
-|        ├──PiD_res2kto4k_sr4x_official_flux_distill_4step.pth or PiD_res2k_sr4x_official_flux_distill_4step.pth # PID use
-|     ├── vae/ae.safetensors #comfy 
-|     ├── clip_vision/siglip2-so400m-patch16-512.safetensors  #rename from model.safetensors  最好重命名个，不然都是siglip 的model.safetensors
-|     ├── LucidFlux/
-|        ├──general_swinir_v1.ckpt
-|        ├──lucidflux.pth
-|        ├──prompt_embeddings.pt # 已适配，使用时不要连clip
-|        ├── lucid_connector.pth
-|        ├──null_caption_embs.pt # PID use
-|        ├──gemma_prompt_embedding.pt # PID use
-```
-
-# 4 Example
-* 4K
+# 3 Example
+* 256 to 4K
 ![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example.png)
-* 2k
-![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example2k.png)
-* 1k
-![](https://github.com/smthemex/ComfyUI_LucidFlux/blob/main/example_workflows/example1k.png)
 
 
-# 5 Citation
+# 4 Citation
 ------
 * [FLUX ](https://github.com/black-forest-labs/flux)
 * [X-flux](https://github.com/XLabs-AI/x-flux)
 * [PID](https://github.com/nv-tlabs/PiD)
 
- LucidFlux 
+LucidFlux 
 ```
 @article{fei2025lucidflux,
   title={LucidFlux: Caption-Free Universal Image Restoration via a Large-Scale Diffusion Transformer},
@@ -72,4 +56,3 @@ pip install -r requirements.txt
   year={2025}
 }
 ```
-

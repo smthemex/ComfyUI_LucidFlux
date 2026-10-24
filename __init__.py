@@ -1,26 +1,22 @@
+"""ComfyUI_LucidFlux — ComfyUI 原生 DiT 推理栈（不再依赖 diffusers / transformers）。
 
-from .LucidFlux_node import LucidFlux_SM_Model,LucidFlux_SM_Diffbir,LucidFlux_SM_Pid_Model,LucidFlux_SM_Cond,LucidFlux_SM_Encode,LucidFlux_SM_KSampler,LucidFlux_SM_Decoder,LucidFlux_SM_Pid_Decoder
-from comfy_api.latest import ComfyExtension, io
-from typing_extensions import override
+链路只用到 comfy 原生能力 + torch：
+    UNETLoader(flux1-dev) → LucidFluxCondition(control) → LucidFluxSampler
+    VAELoader(UltraFlux) → LucidFluxVAEPatch → VAEDecode → LucidFluxColorAlign
+    可选 4K：LucidFluxSampler.latent → LucidFluxPiDDecode
 
-class LucidFlux_SM_Extension(ComfyExtension):
-    @override
-    async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [
-            LucidFlux_SM_Model,
-            LucidFlux_SM_Diffbir,
-            LucidFlux_SM_Cond,
-            LucidFlux_SM_Encode,
-            LucidFlux_SM_KSampler,
-            LucidFlux_SM_Pid_Model,
-            LucidFlux_SM_Pid_Decoder,
-            LucidFlux_SM_Decoder,
-        ]
+旧的 diffusers wrapper（src/、inference.py、LucidFlux_node.py）已移除。
+"""
+import os
 
+import folder_paths
 
-async def comfy_entrypoint() -> LucidFlux_SM_Extension:  # ComfyUI calls this to load your extension and its nodes.
-    return LucidFlux_SM_Extension()
+_MODELS_DIR = os.path.join(folder_paths.models_dir, "LucidFlux")
+if not os.path.isdir(_MODELS_DIR):
+    os.makedirs(_MODELS_DIR, exist_ok=True)
+if "LucidFlux" not in folder_paths.folder_names_and_paths:
+    folder_paths.add_model_folder_path("LucidFlux", _MODELS_DIR)
 
+from .lucidflux_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS  # noqa: E402
 
-
-
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
